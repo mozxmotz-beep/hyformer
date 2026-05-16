@@ -60,6 +60,7 @@ class PCVRHyFormerRankingTrainer:
         train_config: Optional[Dict[str, Any]] = None,
         warmup_steps: int = 2000,
         grad_clip_norm: float = 1.0,
+        skip_loss_threshold: float = 100.0,
     ) -> None:
         self.model: nn.Module = model
         self.train_loader: DataLoader = train_loader
@@ -111,12 +112,14 @@ class PCVRHyFormerRankingTrainer:
         self.train_config: Optional[Dict[str, Any]] = train_config
         self.warmup_steps: int = max(0, int(warmup_steps))
         self.grad_clip_norm: float = float(grad_clip_norm)
+        self.skip_loss_threshold: float = float(skip_loss_threshold)
         self.base_dense_lr: float = lr
 
         logging.info(f"PCVRHyFormerRankingTrainer loss_type={loss_type}, "
                      f"focal_alpha={focal_alpha}, focal_gamma={focal_gamma}, "
                      f"reinit_sparse_after_epoch={reinit_sparse_after_epoch}, "
-                     f"warmup_steps={self.warmup_steps}, grad_clip_norm={self.grad_clip_norm}")
+                     f"warmup_steps={self.warmup_steps}, grad_clip_norm={self.grad_clip_norm}, "
+                     f"skip_loss_threshold={self.skip_loss_threshold}")
 
     def _build_step_dir_name(self, global_step: int, is_best: bool = False) -> str:
         """Build a checkpoint sub-directory name such as
@@ -305,10 +308,14 @@ class PCVRHyFormerRankingTrainer:
             train_pbar = tqdm(enumerate(self.train_loader), total=len(self.train_loader),
                               dynamic_ncols=True)
             loss_sum = 0.0
+            effective_steps = 0
 
             for step, batch in train_pbar:
                 loss = self._train_step(batch, total_step)
+                if loss is None:
+                    continue
                 total_step += 1
+                effective_steps += 1
                 loss_sum += loss
 
                 if self.writer:
@@ -335,7 +342,8 @@ class PCVRHyFormerRankingTrainer:
                         logging.info(f"Early stopping at step {total_step}")
                         return
 
-            logging.info(f"Epoch {epoch}, Average Loss: {loss_sum / len(self.train_loader)}")
+            denom = max(1, effective_steps)
+            logging.info(f"Epoch {epoch}, Average Loss: {loss_sum / denom}")
 
             val_auc, val_logloss = self.evaluate(epoch=epoch)
             self.model.train()
@@ -405,10 +413,13 @@ class PCVRHyFormerRankingTrainer:
             seq_time_buckets=seq_time_buckets,
         )
 
-    def _train_step(self, batch: Dict[str, Any], total_step: int) -> float:
+    def _train_step(self, batch: Dict[str, Any], total_step: int) -> Optional[float]:
         """Run a single training step and return the scalar loss value."""
         device_batch = self._batch_to_device(batch)
         label = device_batch['label'].float()
+        if not torch.isfinite(label).all():
+            logging.warning(f"[Train] step={total_step} skipped due to non-finite labels")
+            return None
 
         self.dense_optimizer.zero_grad()
         if self.sparse_optimizer is not None:
@@ -422,6 +433,12 @@ class PCVRHyFormerRankingTrainer:
             loss = sigmoid_focal_loss(logits, label, alpha=self.focal_alpha, gamma=self.focal_gamma)
         else:
             loss = F.binary_cross_entropy_with_logits(logits, label)
+        loss_item = float(loss.detach().item())
+        if (not np.isfinite(loss_item)) or (
+            self.skip_loss_threshold > 0 and loss_item > self.skip_loss_threshold
+        ):
+            logging.warning(f"[Train] step={total_step} skipped due to abnormal loss={loss_item:.6f}")
+            return None
         loss.backward()
         if self.warmup_steps > 0:
             warmup_ratio = min(1.0, float(total_step + 1) / float(self.warmup_steps))

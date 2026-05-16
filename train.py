@@ -52,14 +52,17 @@ def parse_args() -> argparse.Namespace:
                         help='Log directory (env: TRAIN_LOG_PATH)')
 
     # Training hyperparameters.
-    parser.add_argument('--batch_size', type=int, default=256,
+    parser.add_argument('--batch_size', type=int, default=128,
                         help='Batch size for both training and validation')
-    parser.add_argument('--lr', type=float, default=1e-4,
+    parser.add_argument('--lr', type=float, default=5e-5,
                         help='Learning rate for dense parameters (AdamW)')
     parser.add_argument('--warmup_steps', type=int, default=2000,
                         help='Linear warmup steps for dense optimizer (0 = disabled)')
     parser.add_argument('--grad_clip_norm', type=float, default=1.0,
                         help='Gradient clipping max-norm (0 = disabled)')
+    parser.add_argument('--skip_loss_threshold', type=float, default=100.0,
+                        help='Skip a batch when loss is non-finite or exceeds this threshold '
+                             '(<=0 disables threshold-based skipping)')
     parser.add_argument('--num_epochs', type=int, default=999,
                         help='Maximum number of training epochs '
                              '(typically terminated earlier by early stopping)')
@@ -354,6 +357,7 @@ def main() -> None:
         reinit_cardinality_threshold=args.reinit_cardinality_threshold,
         warmup_steps=args.warmup_steps,
         grad_clip_norm=args.grad_clip_norm,
+        skip_loss_threshold=args.skip_loss_threshold,
         ckpt_params=ckpt_params,
         writer=writer,
         schema_path=schema_path,
