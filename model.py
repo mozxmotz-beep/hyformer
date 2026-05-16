@@ -1229,6 +1229,7 @@ class PCVRHyFormer(nn.Module):
         ns_tokenizer_type: str = 'rankmixer',
         user_ns_tokens: int = 0,
         item_ns_tokens: int = 0,
+        use_esmm: bool = True,
     ) -> None:
         super().__init__()
 
@@ -1244,6 +1245,7 @@ class PCVRHyFormer(nn.Module):
         self.emb_skip_threshold = emb_skip_threshold
         self.seq_id_threshold = seq_id_threshold
         self.ns_tokenizer_type = ns_tokenizer_type
+        self.use_esmm = use_esmm
 
         # ================== NS Tokens Construction ==================
 
@@ -1421,7 +1423,7 @@ class PCVRHyFormer(nn.Module):
         # Dropout
         self.emb_dropout = nn.Dropout(dropout_rate)
 
-        # Classifier
+        # Classifier(s)
         self.clsfier = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.LayerNorm(d_model),
@@ -1429,6 +1431,9 @@ class PCVRHyFormer(nn.Module):
             nn.Dropout(dropout_rate),
             nn.Linear(d_model, action_num)
         )
+        if self.use_esmm:
+            self.ctr_head = nn.Linear(d_model, 1)
+            self.cvr_head = nn.Linear(d_model, 1)
 
         # Initialize parameters
         self._init_params()
@@ -1631,84 +1636,45 @@ class PCVRHyFormer(nn.Module):
 
         return output
 
-    def forward(self, inputs: ModelInput) -> torch.Tensor:
-        """Runs the forward pass of the PCVRHyFormer model."""
-        # 1. NS tokens: grouped projection
-        user_ns = self.user_ns_tokenizer(inputs.user_int_feats)   # (B, num_user_groups, D)
-        item_ns = self.item_ns_tokenizer(inputs.item_int_feats)   # (B, num_item_groups, D)
-
+    def _encode_backbone(self, inputs: ModelInput, apply_dropout: bool) -> torch.Tensor:
+        user_ns = self.user_ns_tokenizer(inputs.user_int_feats)
+        item_ns = self.item_ns_tokenizer(inputs.item_int_feats)
         ns_parts = [user_ns]
         if self.has_user_dense:
-            user_dense_tok = F.silu(self.user_dense_proj(inputs.user_dense_feats)).unsqueeze(1)  # (B, 1, D)
-            ns_parts.append(user_dense_tok)
+            ns_parts.append(F.silu(self.user_dense_proj(inputs.user_dense_feats)).unsqueeze(1))
         ns_parts.append(item_ns)
         if self.has_item_dense:
-            item_dense_tok = F.silu(self.item_dense_proj(inputs.item_dense_feats)).unsqueeze(1)  # (B, 1, D)
-            ns_parts.append(item_dense_tok)
-
-        ns_tokens = torch.cat(ns_parts, dim=1)  # (B, num_ns, D)
-
-        # 2. Embed each sequence domain (dynamic)
+            ns_parts.append(F.silu(self.item_dense_proj(inputs.item_dense_feats)).unsqueeze(1))
+        ns_tokens = torch.cat(ns_parts, dim=1)
         seq_tokens_list = []
         seq_masks_list = []
         for domain in self.seq_domains:
             tokens = self._embed_seq_domain(
-                inputs.seq_data[domain],
-                self._seq_embs[domain], self._seq_proj[domain],
-                self._seq_is_id[domain], self._seq_emb_index[domain],
-                inputs.seq_time_buckets[domain])
+                inputs.seq_data[domain], self._seq_embs[domain], self._seq_proj[domain],
+                self._seq_is_id[domain], self._seq_emb_index[domain], inputs.seq_time_buckets[domain]
+            )
             seq_tokens_list.append(tokens)
-            mask = self._make_padding_mask(inputs.seq_lens[domain], inputs.seq_data[domain].shape[2])
-            seq_masks_list.append(mask)
-
-        # 3. Generate independent Q tokens per sequence via MultiSeqQueryGenerator
+            seq_masks_list.append(self._make_padding_mask(inputs.seq_lens[domain], inputs.seq_data[domain].shape[2]))
         q_tokens_list = self.query_generator(ns_tokens, seq_tokens_list, seq_masks_list)
-
-        # 4. Dropout + MultiSeqHyFormerBlock stack + output projection
-        output = self._run_multi_seq_blocks(
-            q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
-            apply_dropout=self.training
+        return self._run_multi_seq_blocks(
+            q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list, apply_dropout=apply_dropout
         )
 
-        # 5. Classifier
+    def forward(self, inputs: ModelInput) -> torch.Tensor:
+        """Runs the forward pass of the PCVRHyFormer model."""
+        output = self._encode_backbone(inputs, apply_dropout=self.training)
         logits = self.clsfier(output)  # (B, action_num)
         return logits
 
+    def forward_esmm(self, inputs: ModelInput) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return CTR and CVR logits for ESMM."""
+        if not self.use_esmm:
+            raise RuntimeError("forward_esmm called but use_esmm=False")
+        emb = self._encode_backbone(inputs, apply_dropout=self.training)
+        return self.ctr_head(emb).squeeze(-1), self.cvr_head(emb).squeeze(-1)
+
     def predict(self, inputs: ModelInput) -> Tuple[torch.Tensor, torch.Tensor]:
         """Runs inference without dropout, returning both logits and embeddings."""
-        # Reuses forward logic but without dropout
-        user_ns = self.user_ns_tokenizer(inputs.user_int_feats)
-        item_ns = self.item_ns_tokenizer(inputs.item_int_feats)
-
-        ns_parts = [user_ns]
-        if self.has_user_dense:
-            user_dense_tok = F.silu(self.user_dense_proj(inputs.user_dense_feats)).unsqueeze(1)
-            ns_parts.append(user_dense_tok)
-        ns_parts.append(item_ns)
-        if self.has_item_dense:
-            item_dense_tok = F.silu(self.item_dense_proj(inputs.item_dense_feats)).unsqueeze(1)
-            ns_parts.append(item_dense_tok)
-
-        ns_tokens = torch.cat(ns_parts, dim=1)
-
-        seq_tokens_list = []
-        seq_masks_list = []
-        for domain in self.seq_domains:
-            tokens = self._embed_seq_domain(
-                inputs.seq_data[domain],
-                self._seq_embs[domain], self._seq_proj[domain],
-                self._seq_is_id[domain], self._seq_emb_index[domain],
-                inputs.seq_time_buckets[domain])
-            seq_tokens_list.append(tokens)
-            mask = self._make_padding_mask(inputs.seq_lens[domain], inputs.seq_data[domain].shape[2])
-            seq_masks_list.append(mask)
-
-        q_tokens_list = self.query_generator(ns_tokens, seq_tokens_list, seq_masks_list)
-
-        output = self._run_multi_seq_blocks(
-            q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
-            apply_dropout=False
-        )
-
+        output = self._encode_backbone(inputs, apply_dropout=False)
         logits = self.clsfier(output)
         return logits, output

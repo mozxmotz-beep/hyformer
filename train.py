@@ -137,6 +137,14 @@ def parse_args() -> argparse.Namespace:
     # Loss function.
     parser.add_argument('--loss_type', type=str, default='bce', choices=['bce', 'focal'],
                         help='Loss type: bce = BCEWithLogits, focal = Focal Loss')
+    parser.add_argument('--use_esmm', action='store_true', default=True,
+                        help='Enable ESMM multi-task training (CTR + CTCVR); default on')
+    parser.add_argument('--no_esmm', dest='use_esmm', action='store_false',
+                        help='Disable ESMM and fall back to single-task conversion training')
+    parser.add_argument('--esmm_w_ctr', type=float, default=1.0,
+                        help='Weight of CTR loss when --use_esmm is enabled')
+    parser.add_argument('--esmm_w_ctcvr', type=float, default=1.0,
+                        help='Weight of CTCVR loss when --use_esmm is enabled')
     parser.add_argument('--focal_alpha', type=float, default=0.1,
                         help='Focal Loss positive-class weight alpha '
                              '(effective only when --loss_type=focal)')
@@ -147,6 +155,14 @@ def parse_args() -> argparse.Namespace:
     # Sparse optimizer.
     parser.add_argument('--sparse_lr', type=float, default=0.05,
                         help='Learning rate for sparse parameters (Adagrad over Embeddings)')
+    parser.add_argument('--grad_clip_norm', type=float, default=1.0,
+                        help='Global grad-norm clip threshold (0 disables clipping)')
+    parser.add_argument('--warmup_ratio', type=float, default=0.03,
+                        help='Dense optimizer warmup ratio in [0, 1]')
+    parser.add_argument('--min_lr_ratio', type=float, default=0.1,
+                        help='Minimum LR ratio after cosine decay')
+    parser.add_argument('--loss_ema_decay', type=float, default=0.95,
+                        help='EMA decay for Loss/train_ema logging')
     parser.add_argument('--sparse_weight_decay', type=float, default=0.0,
                         help='Weight decay for sparse parameters (Adagrad over Embeddings)')
     parser.add_argument('--reinit_sparse_after_epoch', type=int, default=1,
@@ -301,6 +317,7 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "use_esmm": args.use_esmm,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
@@ -350,6 +367,13 @@ def main() -> None:
         ns_groups_path=args.ns_groups_json if args.ns_groups_json and os.path.exists(args.ns_groups_json) else None,
         eval_every_n_steps=args.eval_every_n_steps,
         train_config=vars(args),
+        use_esmm=args.use_esmm,
+        esmm_w_ctr=args.esmm_w_ctr,
+        esmm_w_ctcvr=args.esmm_w_ctcvr,
+        grad_clip_norm=args.grad_clip_norm,
+        warmup_ratio=args.warmup_ratio,
+        min_lr_ratio=args.min_lr_ratio,
+        loss_ema_decay=args.loss_ema_decay,
     )
 
     trainer.train()

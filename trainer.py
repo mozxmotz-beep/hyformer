@@ -58,6 +58,13 @@ class PCVRHyFormerRankingTrainer:
         ns_groups_path: Optional[str] = None,
         eval_every_n_steps: int = 0,
         train_config: Optional[Dict[str, Any]] = None,
+        use_esmm: bool = True,
+        esmm_w_ctr: float = 1.0,
+        esmm_w_ctcvr: float = 1.0,
+        grad_clip_norm: float = 1.0,
+        warmup_ratio: float = 0.03,
+        min_lr_ratio: float = 0.1,
+        loss_ema_decay: float = 0.95,
     ) -> None:
         self.model: nn.Module = model
         self.train_loader: DataLoader = train_loader
@@ -107,6 +114,17 @@ class PCVRHyFormerRankingTrainer:
         self.ckpt_params: Dict[str, Any] = ckpt_params or {}
         self.eval_every_n_steps: int = eval_every_n_steps
         self.train_config: Optional[Dict[str, Any]] = train_config
+        self.use_esmm: bool = use_esmm
+        self.esmm_w_ctr: float = esmm_w_ctr
+        self.esmm_w_ctcvr: float = esmm_w_ctcvr
+        self.grad_clip_norm: float = grad_clip_norm
+        self.warmup_ratio: float = warmup_ratio
+        self.min_lr_ratio: float = min_lr_ratio
+        self.loss_ema_decay: float = loss_ema_decay
+        self.loss_ema: Optional[float] = None
+        self._global_step: int = 0
+        self._total_steps: int = max(1, num_epochs * max(1, len(train_loader)))
+        self._warmup_steps: int = max(1, int(self._total_steps * self.warmup_ratio))
 
         logging.info(f"PCVRHyFormerRankingTrainer loss_type={loss_type}, "
                      f"focal_alpha={focal_alpha}, focal_gamma={focal_gamma}, "
@@ -301,12 +319,18 @@ class PCVRHyFormerRankingTrainer:
             loss_sum = 0.0
 
             for step, batch in train_pbar:
+                self._global_step = total_step + 1
                 loss = self._train_step(batch)
                 total_step += 1
                 loss_sum += loss
 
                 if self.writer:
-                    self.writer.add_scalar('Loss/train', loss, total_step)
+                    self.writer.add_scalar('Loss/train_raw', loss, total_step)
+                    if self.loss_ema is None:
+                        self.loss_ema = loss
+                    else:
+                        self.loss_ema = self.loss_ema_decay * self.loss_ema + (1.0 - self.loss_ema_decay) * loss
+                    self.writer.add_scalar('Loss/train_ema', self.loss_ema, total_step)
 
                 train_pbar.set_postfix({"loss": f"{loss:.4f}"})
 
@@ -409,23 +433,52 @@ class PCVRHyFormerRankingTrainer:
             self.sparse_optimizer.zero_grad()
 
         model_input = self._make_model_input(device_batch)
-        logits = self.model(model_input)  # (B, 1)
-        logits = logits.squeeze(-1)  # (B,)
-
-        if self.loss_type == 'focal':
-            loss = sigmoid_focal_loss(logits, label, alpha=self.focal_alpha, gamma=self.focal_gamma)
+        if self.use_esmm:
+            click_label = device_batch.get('click_label', label).float()
+            convert_label = device_batch.get('convert_label', label).float()
+            ctr_logits, cvr_logits = self.model.forward_esmm(model_input)
+            ctr_prob = torch.sigmoid(ctr_logits)
+            cvr_prob = torch.sigmoid(cvr_logits)
+            ctcvr_prob = torch.clamp(ctr_prob * cvr_prob, min=1e-6, max=1.0 - 1e-6)
+            loss_ctr = F.binary_cross_entropy_with_logits(ctr_logits, click_label)
+            loss_ctcvr = F.binary_cross_entropy(ctcvr_prob, convert_label)
+            loss = self.esmm_w_ctr * loss_ctr + self.esmm_w_ctcvr * loss_ctcvr
         else:
-            loss = F.binary_cross_entropy_with_logits(logits, label)
+            logits = self.model(model_input)  # (B, 1)
+            logits = logits.squeeze(-1)  # (B,)
+            if self.loss_type == 'focal':
+                loss = sigmoid_focal_loss(logits, label, alpha=self.focal_alpha, gamma=self.focal_gamma)
+            else:
+                loss = F.binary_cross_entropy_with_logits(logits, label)
         loss.backward()
         # foreach=False: avoids a PyTorch _foreach_norm CUDA kernel bug observed
         # with certain tensor shapes in this project.
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, foreach=False)
+        if self.grad_clip_norm > 0:
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(), max_norm=self.grad_clip_norm, foreach=False
+            )
+            if self.writer:
+                self.writer.add_scalar('Grad/norm', float(grad_norm), self._global_step)
+        self._update_dense_lr()
 
         self.dense_optimizer.step()
         if self.sparse_optimizer is not None:
             self.sparse_optimizer.step()
 
         return loss.item()
+
+    def _update_dense_lr(self) -> None:
+        step = min(max(self._global_step, 1), self._total_steps)
+        if step <= self._warmup_steps:
+            scale = step / self._warmup_steps
+        else:
+            progress = (step - self._warmup_steps) / max(1, self._total_steps - self._warmup_steps)
+            cosine = 0.5 * (1.0 + np.cos(np.pi * progress))
+            scale = self.min_lr_ratio + (1.0 - self.min_lr_ratio) * cosine
+        for pg in self.dense_optimizer.param_groups:
+            base_lr = pg.get('initial_lr', pg['lr'])
+            pg['initial_lr'] = base_lr
+            pg['lr'] = base_lr * scale
 
     def evaluate(self, epoch: Optional[int] = None) -> Tuple[float, float]:
         """Run validation over ``self.valid_loader`` and return ``(AUC, logloss)``.

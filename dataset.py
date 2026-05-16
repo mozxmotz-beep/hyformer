@@ -509,10 +509,16 @@ class PCVRParquetDataset(IterableDataset):
         # ---- meta ----
         timestamps = batch.column(self._col_idx['timestamp']).to_numpy().astype(np.int64)
         if self.is_training:
-            labels = (batch.column(self._col_idx['label_type']).fill_null(0)
-                      .to_numpy(zero_copy_only=False).astype(np.int64) == 2).astype(np.int64)
+            label_type_arr = (batch.column(self._col_idx['label_type']).fill_null(0)
+                              .to_numpy(zero_copy_only=False).astype(np.int64))
+            # Backward-compatible label: conversion objective.
+            labels = (label_type_arr == 2).astype(np.int64)
+            click_labels = (label_type_arr > 0).astype(np.int64)
+            convert_labels = labels
         else:
             labels = np.zeros(B, dtype=np.int64)
+            click_labels = np.zeros(B, dtype=np.int64)
+            convert_labels = np.zeros(B, dtype=np.int64)
         user_ids = batch.column(self._col_idx['user_id']).to_pylist()
 
         # ---- user_int: write into pre-allocated buffer ----
@@ -576,6 +582,8 @@ class PCVRParquetDataset(IterableDataset):
             'item_int_feats': torch.from_numpy(item_int.copy()),
             'item_dense_feats': torch.zeros(B, 0, dtype=torch.float32),
             'label': torch.from_numpy(labels),
+            'click_label': torch.from_numpy(click_labels),
+            'convert_label': torch.from_numpy(convert_labels),
             'timestamp': torch.from_numpy(timestamps),
             'user_id': user_ids,
             '_seq_domains': self.seq_domains,
