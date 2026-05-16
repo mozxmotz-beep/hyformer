@@ -56,6 +56,10 @@ def parse_args() -> argparse.Namespace:
                         help='Batch size for both training and validation')
     parser.add_argument('--lr', type=float, default=1e-4,
                         help='Learning rate for dense parameters (AdamW)')
+    parser.add_argument('--warmup_steps', type=int, default=2000,
+                        help='Linear warmup steps for dense optimizer (0 = disabled)')
+    parser.add_argument('--grad_clip_norm', type=float, default=1.0,
+                        help='Gradient clipping max-norm (0 = disabled)')
     parser.add_argument('--num_epochs', type=int, default=999,
                         help='Maximum number of training epochs '
                              '(typically terminated earlier by early stopping)')
@@ -108,6 +112,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--dropout_rate', type=float, default=0.01,
                         help='Dropout rate for the backbone '
                              '(seq id-embedding dropout is twice this value)')
+    parser.add_argument('--seq_id_dropout_rate', type=float, default=-1.0,
+                        help='Dropout rate for high-cardinality seq-id features '
+                             '(-1 = auto use dropout_rate*2)')
     parser.add_argument('--seq_top_k', type=int, default=50,
                         help='Number of most-recent tokens kept by LongerEncoder '
                              '(only effective when --seq_encoder_type=longer)')
@@ -298,6 +305,7 @@ def main() -> None:
         "rope_base": args.rope_base,
         "emb_skip_threshold": args.emb_skip_threshold,
         "seq_id_threshold": args.seq_id_threshold,
+        "seq_id_dropout_rate": args.seq_id_dropout_rate,
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
@@ -344,6 +352,8 @@ def main() -> None:
         sparse_weight_decay=args.sparse_weight_decay,
         reinit_sparse_after_epoch=args.reinit_sparse_after_epoch,
         reinit_cardinality_threshold=args.reinit_cardinality_threshold,
+        warmup_steps=args.warmup_steps,
+        grad_clip_norm=args.grad_clip_norm,
         ckpt_params=ckpt_params,
         writer=writer,
         schema_path=schema_path,

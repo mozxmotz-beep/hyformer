@@ -1225,6 +1225,7 @@ class PCVRHyFormer(nn.Module):
         rope_base: float = 10000.0,
         emb_skip_threshold: int = 0,
         seq_id_threshold: int = 10000,
+        seq_id_dropout_rate: float = -1.0,
         # NS tokenizer variant
         ns_tokenizer_type: str = 'rankmixer',
         user_ns_tokens: int = 0,
@@ -1329,7 +1330,8 @@ class PCVRHyFormer(nn.Module):
         # seq_id_threshold decides which features inside the seq tokenizer are
         # treated as id features (they receive extra dropout). It is fully
         # independent of emb_skip_threshold (which skips Embedding creation).
-        self.seq_id_emb_dropout = nn.Dropout(dropout_rate * 2)
+        effective_seq_id_dropout = (dropout_rate * 2) if seq_id_dropout_rate < 0 else seq_id_dropout_rate
+        self.seq_id_emb_dropout = nn.Dropout(effective_seq_id_dropout)
 
         def _make_seq_embs(vocab_sizes):
             """Create embedding list, returning None for features skipped via

@@ -58,6 +58,8 @@ class PCVRHyFormerRankingTrainer:
         ns_groups_path: Optional[str] = None,
         eval_every_n_steps: int = 0,
         train_config: Optional[Dict[str, Any]] = None,
+        warmup_steps: int = 2000,
+        grad_clip_norm: float = 1.0,
     ) -> None:
         self.model: nn.Module = model
         self.train_loader: DataLoader = train_loader
@@ -107,10 +109,14 @@ class PCVRHyFormerRankingTrainer:
         self.ckpt_params: Dict[str, Any] = ckpt_params or {}
         self.eval_every_n_steps: int = eval_every_n_steps
         self.train_config: Optional[Dict[str, Any]] = train_config
+        self.warmup_steps: int = max(0, int(warmup_steps))
+        self.grad_clip_norm: float = float(grad_clip_norm)
+        self.base_dense_lr: float = lr
 
         logging.info(f"PCVRHyFormerRankingTrainer loss_type={loss_type}, "
                      f"focal_alpha={focal_alpha}, focal_gamma={focal_gamma}, "
-                     f"reinit_sparse_after_epoch={reinit_sparse_after_epoch}")
+                     f"reinit_sparse_after_epoch={reinit_sparse_after_epoch}, "
+                     f"warmup_steps={self.warmup_steps}, grad_clip_norm={self.grad_clip_norm}")
 
     def _build_step_dir_name(self, global_step: int, is_best: bool = False) -> str:
         """Build a checkpoint sub-directory name such as
@@ -301,7 +307,7 @@ class PCVRHyFormerRankingTrainer:
             loss_sum = 0.0
 
             for step, batch in train_pbar:
-                loss = self._train_step(batch)
+                loss = self._train_step(batch, total_step)
                 total_step += 1
                 loss_sum += loss
 
@@ -399,7 +405,7 @@ class PCVRHyFormerRankingTrainer:
             seq_time_buckets=seq_time_buckets,
         )
 
-    def _train_step(self, batch: Dict[str, Any]) -> float:
+    def _train_step(self, batch: Dict[str, Any], total_step: int) -> float:
         """Run a single training step and return the scalar loss value."""
         device_batch = self._batch_to_device(batch)
         label = device_batch['label'].float()
@@ -417,9 +423,15 @@ class PCVRHyFormerRankingTrainer:
         else:
             loss = F.binary_cross_entropy_with_logits(logits, label)
         loss.backward()
+        if self.warmup_steps > 0:
+            warmup_ratio = min(1.0, float(total_step + 1) / float(self.warmup_steps))
+            for g in self.dense_optimizer.param_groups:
+                g['lr'] = self.base_dense_lr * warmup_ratio
         # foreach=False: avoids a PyTorch _foreach_norm CUDA kernel bug observed
         # with certain tensor shapes in this project.
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0, foreach=False)
+        if self.grad_clip_norm > 0:
+            torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(), max_norm=self.grad_clip_norm, foreach=False)
 
         self.dense_optimizer.step()
         if self.sparse_optimizer is not None:
