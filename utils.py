@@ -130,12 +130,12 @@ class EarlyStopping:
     """
 
     def __init__(
-        self,
-        checkpoint_path: str,
-        label: str = "",
-        patience: int = 5,
-        verbose: bool = False,
-        delta: float = 0,
+            self,
+            checkpoint_path: str,
+            label: str = "",
+            patience: int = 5,
+            verbose: bool = False,
+            delta: float = 0,
     ) -> None:
         self.checkpoint_path: str = checkpoint_path
         self.patience: int = patience
@@ -163,10 +163,10 @@ class EarlyStopping:
         return True
 
     def __call__(
-        self,
-        score: float,
-        model: nn.Module,
-        extra_metrics: Optional[Dict[str, Any]] = None,
+            self,
+            score: float,
+            model: nn.Module,
+            extra_metrics: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Feed a new validation score into the tracker.
 
@@ -258,11 +258,11 @@ def set_seed(seed: int) -> None:
 
 
 def sigmoid_focal_loss(
-    logits: torch.Tensor,
-    targets: torch.Tensor,
-    alpha: float = 0.1,
-    gamma: float = 2.0,
-    reduction: str = 'mean',
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        alpha: float = 0.1,
+        gamma: float = 2.0,
+        reduction: str = 'mean',
 ) -> torch.Tensor:
     """Focal Loss: FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
 

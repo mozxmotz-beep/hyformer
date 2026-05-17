@@ -36,28 +36,28 @@ class PCVRHyFormerRankingTrainer:
     """
 
     def __init__(
-        self,
-        model: nn.Module,
-        train_loader: DataLoader,
-        valid_loader: DataLoader,
-        lr: float,
-        num_epochs: int,
-        device: str,
-        save_dir: str,
-        early_stopping: EarlyStopping,
-        loss_type: str = 'bce',
-        focal_alpha: float = 0.1,
-        focal_gamma: float = 2.0,
-        sparse_lr: float = 0.05,
-        sparse_weight_decay: float = 0.0,
-        reinit_sparse_after_epoch: int = 1,
-        reinit_cardinality_threshold: int = 0,
-        ckpt_params: Optional[Dict[str, Any]] = None,
-        writer: Optional[Any] = None,
-        schema_path: Optional[str] = None,
-        ns_groups_path: Optional[str] = None,
-        eval_every_n_steps: int = 0,
-        train_config: Optional[Dict[str, Any]] = None,
+            self,
+            model: nn.Module,
+            train_loader: DataLoader,
+            valid_loader: DataLoader,
+            lr: float,
+            num_epochs: int,
+            device: str,
+            save_dir: str,
+            early_stopping: EarlyStopping,
+            loss_type: str = 'bce',
+            focal_alpha: float = 0.1,
+            focal_gamma: float = 2.0,
+            sparse_lr: float = 0.05,
+            sparse_weight_decay: float = 0.0,
+            reinit_sparse_after_epoch: int = 1,
+            reinit_cardinality_threshold: int = 0,
+            ckpt_params: Optional[Dict[str, Any]] = None,
+            writer: Optional[Any] = None,
+            schema_path: Optional[str] = None,
+            ns_groups_path: Optional[str] = None,
+            eval_every_n_steps: int = 0,
+            train_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.model: nn.Module = model
         self.train_loader: DataLoader = train_loader
@@ -168,10 +168,10 @@ class PCVRHyFormerRankingTrainer:
                 json.dump(cfg_to_dump, f, indent=2)
 
     def _save_step_checkpoint(
-        self,
-        global_step: int,
-        is_best: bool = False,
-        skip_model_file: bool = False,
+            self,
+            global_step: int,
+            is_best: bool = False,
+            skip_model_file: bool = False,
     ) -> str:
         """Save ``model.pt`` plus sidecar files under a ``global_step`` sub-dir.
 
@@ -216,10 +216,10 @@ class PCVRHyFormerRankingTrainer:
         return device_batch
 
     def _handle_validation_result(
-        self,
-        total_step: int,
-        val_auc: float,
-        val_logloss: float,
+            self,
+            total_step: int,
+            val_auc: float,
+            val_logloss: float,
     ) -> None:
         """Persist a new-best checkpoint atomically.
 
@@ -246,8 +246,8 @@ class PCVRHyFormerRankingTrainer:
         """
         old_best = self.early_stopping.best_score
         is_likely_new_best = (
-            old_best is None
-            or val_auc > old_best + self.early_stopping.delta
+                old_best is None
+                or val_auc > old_best + self.early_stopping.delta
         )
         if not is_likely_new_best:
             # No new best anticipated: leave disk untouched. The previous
@@ -281,7 +281,7 @@ class PCVRHyFormerRankingTrainer:
         # but EarlyStopping internally declined to save, skip to avoid
         # creating an empty (sidecar-only) checkpoint directory.
         if self.early_stopping.best_score != old_best and os.path.exists(
-            self.early_stopping.checkpoint_path
+                self.early_stopping.checkpoint_path
         ):
             self._save_step_checkpoint(
                 total_step, is_best=True, skip_model_file=True)
@@ -481,7 +481,7 @@ class PCVRHyFormerRankingTrainer:
         return auc, logloss
 
     def _evaluate_step(
-        self, batch: Dict[str, Any]
+            self, batch: Dict[str, Any]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Run a single validation step and return ``(logits, labels)``."""
         device_batch = self._batch_to_device(batch)

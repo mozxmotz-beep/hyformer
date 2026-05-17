@@ -25,8 +25,8 @@ from trainer import PCVRHyFormerRankingTrainer
 
 
 def build_feature_specs(
-    schema: FeatureSchema,
-    per_position_vocab_sizes: List[int],
+        schema: FeatureSchema,
+        per_position_vocab_sizes: List[int],
 ) -> List[Tuple[int, int, int]]:
     """Build feature_specs of the form ``[(vocab_size, offset, length), ...]``
     ordered by the positions recorded in ``schema.entries``.
