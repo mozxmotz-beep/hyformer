@@ -1422,12 +1422,36 @@ class PCVRHyFormer(nn.Module):
         self.emb_dropout = nn.Dropout(dropout_rate)
 
         # Classifier
-        self.clsfier = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.LayerNorm(d_model),
+        # Multi-task head: MMoE + task-specific towers
+        self.num_experts = 4
+        self.experts = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, d_model),
+                nn.LayerNorm(d_model),
+                nn.SiLU(),
+                nn.Dropout(dropout_rate),
+            )
+            for _ in range(self.num_experts)
+        ])
+        self.task_gates = nn.ModuleList([
+            nn.Linear(d_model, self.num_experts) for _ in range(action_num)
+        ])
+        self.task_towers = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, d_model),
+                nn.LayerNorm(d_model),
+                nn.SiLU(),
+                nn.Dropout(dropout_rate),
+            )
+            for _ in range(action_num)
+        ])
+        self.task_logits = nn.ModuleList([nn.Linear(d_model, 1) for _ in range(action_num)])
+        # CVR task (task_id=1) uses DIN-style target-aware attention from
+        # historical sequence tokens to candidate item representation.
+        self.cvr_attn_mlp = nn.Sequential(
+            nn.Linear(d_model * 4, d_model),
             nn.SiLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(d_model, action_num)
+            nn.Linear(d_model, 1),
         )
 
         # Initialize parameters
@@ -1581,6 +1605,48 @@ class PCVRHyFormer(nn.Module):
         idx = torch.arange(max_len, device=device).unsqueeze(0)  # (1, max_len)
         return idx >= seq_len.unsqueeze(1)  # (B, max_len)
 
+    def _target_aware_history(
+        self,
+        seq_tokens_list: list,
+        seq_masks_list: list,
+        target_item: torch.Tensor,
+    ) -> torch.Tensor:
+        """DIN-style target-aware attention over all sequence histories."""
+        if len(seq_tokens_list) == 0:
+            return target_item.new_zeros(target_item.shape)
+
+        hist = torch.cat(seq_tokens_list, dim=1)  # (B, L_total, D)
+        mask = torch.cat(seq_masks_list, dim=1)   # (B, L_total), True=padding
+        B, L, D = hist.shape
+        target = target_item.unsqueeze(1).expand(B, L, D)
+        din_in = torch.cat([hist, target, hist - target, hist * target], dim=-1)
+        attn_scores = self.cvr_attn_mlp(din_in).squeeze(-1)  # (B, L)
+        attn_scores = attn_scores.masked_fill(mask, float('-inf'))
+        attn_weights = torch.softmax(attn_scores, dim=-1).unsqueeze(-1)
+        attn_weights = torch.nan_to_num(attn_weights, nan=0.0)
+        return torch.sum(attn_weights * hist, dim=1)
+
+    def _multi_task_logits(
+        self,
+        shared_output: torch.Tensor,
+        seq_tokens_list: list,
+        seq_masks_list: list,
+        item_ns: torch.Tensor,
+    ) -> torch.Tensor:
+        """MMoE fusion + task-specific heads (with CVR target-aware attention)."""
+        expert_outs = torch.stack([expert(shared_output) for expert in self.experts], dim=1)  # (B, E, D)
+        task_logits = []
+        target_item = item_ns.mean(dim=1)
+        cvr_history = self._target_aware_history(seq_tokens_list, seq_masks_list, target_item)
+        for task_id in range(self.action_num):
+            gate_w = torch.softmax(self.task_gates[task_id](shared_output), dim=-1)  # (B, E)
+            mixed = torch.sum(gate_w.unsqueeze(-1) * expert_outs, dim=1)  # (B, D)
+            if task_id == 1:
+                mixed = mixed + cvr_history
+            tower_out = self.task_towers[task_id](mixed)
+            task_logits.append(self.task_logits[task_id](tower_out))
+        return torch.cat(task_logits, dim=-1)
+
     def _run_multi_seq_blocks(
         self,
         q_tokens_list: list,
@@ -1670,8 +1736,8 @@ class PCVRHyFormer(nn.Module):
             apply_dropout=self.training
         )
 
-        # 5. Classifier
-        logits = self.clsfier(output)  # (B, action_num)
+        # 5. Multi-task prediction heads
+        logits = self._multi_task_logits(output, seq_tokens_list, seq_masks_list, item_ns)
         return logits
 
     def predict(self, inputs: ModelInput) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -1710,5 +1776,5 @@ class PCVRHyFormer(nn.Module):
             apply_dropout=False
         )
 
-        logits = self.clsfier(output)
+        logits = self._multi_task_logits(output, seq_tokens_list, seq_masks_list, item_ns)
         return logits, output
