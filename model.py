@@ -1229,7 +1229,7 @@ class PCVRHyFormer(nn.Module):
         ns_tokenizer_type: str = 'rankmixer',
         user_ns_tokens: int = 0,
         item_ns_tokens: int = 0,
-        use_esmm: bool = False,
+        use_esmm: bool = True,
     ) -> None:
         super().__init__()
 

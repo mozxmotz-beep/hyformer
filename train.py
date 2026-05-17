@@ -137,8 +137,10 @@ def parse_args() -> argparse.Namespace:
     # Loss function.
     parser.add_argument('--loss_type', type=str, default='bce', choices=['bce', 'focal'],
                         help='Loss type: bce = BCEWithLogits, focal = Focal Loss')
-    parser.add_argument('--use_esmm', action='store_true', default=False,
-                        help='Enable ESMM multi-task training (CTR + CTCVR)')
+    parser.add_argument('--use_esmm', action='store_true', default=True,
+                        help='Enable ESMM multi-task training (CTR + CTCVR); default on')
+    parser.add_argument('--no_esmm', dest='use_esmm', action='store_false',
+                        help='Disable ESMM and fall back to single-task conversion training')
     parser.add_argument('--esmm_w_ctr', type=float, default=1.0,
                         help='Weight of CTR loss when --use_esmm is enabled')
     parser.add_argument('--esmm_w_ctcvr', type=float, default=1.0,

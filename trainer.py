@@ -58,7 +58,7 @@ class PCVRHyFormerRankingTrainer:
         ns_groups_path: Optional[str] = None,
         eval_every_n_steps: int = 0,
         train_config: Optional[Dict[str, Any]] = None,
-        use_esmm: bool = False,
+        use_esmm: bool = True,
         esmm_w_ctr: float = 1.0,
         esmm_w_ctcvr: float = 1.0,
         grad_clip_norm: float = 1.0,
