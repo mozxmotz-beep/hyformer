@@ -145,8 +145,8 @@ def parse_args() -> argparse.Namespace:
                              '(effective only when --loss_type=focal)')
 
     # Sparse optimizer.
-    parser.add_argument('--sparse_lr', type=float, default=0.05,
-                        help='Learning rate for sparse parameters (Adagrad over Embeddings)')
+    parser.add_argument('--sparse_lr', type=float, default=0.01,
+                        help='Learning rate for sparse parameters (Adagrad over Embeddings). Default lowered to reduce sparse-gradient spikes.')
     parser.add_argument('--sparse_weight_decay', type=float, default=0.0,
                         help='Weight decay for sparse parameters (Adagrad over Embeddings)')
     parser.add_argument('--reinit_sparse_after_epoch', type=int, default=1,
@@ -159,6 +159,20 @@ def parse_args() -> argparse.Namespace:
                         help='Cardinality threshold used by the re-init strategy: '
                              'Embeddings whose vocab_size exceeds this value are reset '
                              'at each epoch end (0 = never reset any Embedding)')
+
+    parser.add_argument('--lr_schedule', type=str, default='warmup_cosine',
+                        choices=['none', 'warmup_cosine'],
+                        help='Learning-rate schedule for dense optimizer.')
+    parser.add_argument('--warmup_ratio', type=float, default=0.05,
+                        help='Warmup ratio used by warmup+cosine scheduler.')
+    parser.add_argument('--min_lr_ratio', type=float, default=0.1,
+                        help='Minimum LR ratio for cosine tail: min_lr = lr * min_lr_ratio.')
+    parser.add_argument('--grad_clip_norm', type=float, default=1.0,
+                        help='Global grad-norm clipping threshold (<=0 to disable).')
+    parser.add_argument('--ema_decay', type=float, default=0.999,
+                        help='EMA decay for shadow model monitoring (<=0 to disable EMA).')
+    parser.add_argument('--ema_eval', action='store_true', default=False,
+                        help='If set, run validation on EMA shadow weights for monitoring.')
 
     # Embedding construction control.
     parser.add_argument('--emb_skip_threshold', type=int, default=0,
@@ -344,6 +358,12 @@ def main() -> None:
         sparse_weight_decay=args.sparse_weight_decay,
         reinit_sparse_after_epoch=args.reinit_sparse_after_epoch,
         reinit_cardinality_threshold=args.reinit_cardinality_threshold,
+        lr_schedule=args.lr_schedule,
+        warmup_ratio=args.warmup_ratio,
+        min_lr_ratio=args.min_lr_ratio,
+        grad_clip_norm=args.grad_clip_norm,
+        ema_decay=args.ema_decay,
+        ema_eval=args.ema_eval,
         ckpt_params=ckpt_params,
         writer=writer,
         schema_path=schema_path,
