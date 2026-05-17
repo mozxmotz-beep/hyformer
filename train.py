@@ -117,6 +117,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--action_num', type=int, default=1,
                         help='Classifier output dimension '
                              '(1 = single binary-classification logit; >1 = multi-label)')
+    parser.add_argument('--cvr_task_index', type=int, default=1,
+                        help='Task index that receives target-aware history attention '
+                             '(only effective when 0 <= index < action_num)')
     parser.add_argument('--use_time_buckets', action='store_true', default=True,
                         help='Enable the time-bucket embedding (default on). '
                              'The actual bucket count is uniquely determined by '
@@ -201,6 +204,9 @@ def parse_args() -> argparse.Namespace:
     args.ckpt_dir = os.environ.get('TRAIN_CKPT_PATH', args.ckpt_dir)
     args.log_dir = os.environ.get('TRAIN_LOG_PATH', args.log_dir)
     args.tf_events_dir = os.environ.get('TRAIN_TF_EVENTS_PATH')
+    if not args.tf_events_dir:
+        # Default TensorBoard path under log_dir when env var is absent.
+        args.tf_events_dir = os.path.join(args.log_dir or ".", "tf_events")
 
     return args
 
@@ -268,6 +274,12 @@ def main() -> None:
         item_ns_groups = [[i] for i in range(len(pcvr_dataset.item_int_schema.entries))]
 
     # ---- Build model ----
+    if args.action_num != 1:
+        raise ValueError(
+            "Current trainer implements binary single-logit BCE/AUC only; "
+            f"got action_num={args.action_num}. Please keep --action_num=1."
+        )
+
     user_int_feature_specs = build_feature_specs(
         pcvr_dataset.user_int_schema, pcvr_dataset.user_int_vocab_sizes)
     item_int_feature_specs = build_feature_specs(
@@ -292,6 +304,7 @@ def main() -> None:
         "seq_top_k": args.seq_top_k,
         "seq_causal": args.seq_causal,
         "action_num": args.action_num,
+        "cvr_task_index": args.cvr_task_index,
         "num_time_buckets": NUM_TIME_BUCKETS if args.use_time_buckets else 0,
         "rank_mixer_mode": args.rank_mixer_mode,
         "use_rope": args.use_rope,
