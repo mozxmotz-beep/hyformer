@@ -1620,7 +1620,6 @@ class PCVRHyFormer(nn.Module):
             return target_item.new_zeros(target_item.shape)
         if self.cvr_attn_mlp is None:
             return target_item.new_zeros(target_item.shape)
-
         hist = torch.cat(seq_tokens_list, dim=1)  # (B, L_total, D)
         mask = torch.cat(seq_masks_list, dim=1)   # (B, L_total), True=padding
         B, L, D = hist.shape
