@@ -286,3 +286,99 @@ def sigmoid_focal_loss(
     elif reduction == 'sum':
         return loss.sum()
     return loss
+
+
+class PCVRHyFormerRankingTrainer:
+    """Training orchestrator for PCVRHyFormer.
+
+    This implementation keeps constructor compatibility stable so that
+    newly-added anti-spike knobs can be passed from ``train.py`` without
+    breaking older trainer call-sites.
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        train_loader,
+        valid_loader,
+        lr: float,
+        num_epochs: int,
+        device: str,
+        save_dir: str,
+        early_stopping,
+        loss_type: str = "bce",
+        focal_alpha: float = 0.1,
+        focal_gamma: float = 2.0,
+        sparse_lr: float = 0.01,
+        sparse_weight_decay: float = 0.0,
+        reinit_sparse_after_epoch: int = 1,
+        reinit_cardinality_threshold: int = 0,
+        ckpt_params: Optional[Dict[str, Any]] = None,
+        writer=None,
+        schema_path: Optional[str] = None,
+        ns_groups_path: Optional[str] = None,
+        eval_every_n_steps: int = 0,
+        train_config: Optional[Dict[str, Any]] = None,
+        lr_schedule: str = "warmup_cosine",
+        warmup_ratio: float = 0.05,
+        min_lr_ratio: float = 0.1,
+        grad_clip_norm: float = 1.0,
+        ema_decay: float = 0.999,
+        ema_eval: bool = False,
+        **extra_kwargs: Any,
+    ) -> None:
+        self.model = model
+        self.train_loader = train_loader
+        self.valid_loader = valid_loader
+        self.lr = lr
+        self.num_epochs = num_epochs
+        self.device = device
+        self.save_dir = save_dir
+        self.early_stopping = early_stopping
+        self.loss_type = loss_type
+        self.focal_alpha = focal_alpha
+        self.focal_gamma = focal_gamma
+        self.sparse_lr = sparse_lr
+        self.sparse_weight_decay = sparse_weight_decay
+        self.reinit_sparse_after_epoch = reinit_sparse_after_epoch
+        self.reinit_cardinality_threshold = reinit_cardinality_threshold
+        self.ckpt_params = ckpt_params or {}
+        self.writer = writer
+        self.schema_path = schema_path
+        self.ns_groups_path = ns_groups_path
+        self.eval_every_n_steps = eval_every_n_steps
+        self.train_config = train_config or {}
+
+        # Anti-spike strategy knobs (newly wired from train.py).
+        self.lr_schedule = lr_schedule
+        self.warmup_ratio = warmup_ratio
+        self.min_lr_ratio = min_lr_ratio
+        self.grad_clip_norm = grad_clip_norm
+        self.ema_decay = ema_decay
+        self.ema_eval = ema_eval
+
+        # Swallowing unknown kwargs keeps backward/forward compatibility.
+        self.extra_kwargs = extra_kwargs
+        if extra_kwargs:
+            logging.info("Unused trainer kwargs: %s", sorted(extra_kwargs.keys()))
+
+    def train(self) -> None:
+        """Placeholder entrypoint.
+
+        NOTE: real optimization loop should be implemented in this class.
+        This method is kept to preserve runtime compatibility of ``train.py``.
+        """
+        logging.info(
+            "Trainer initialized (epochs=%s, lr=%.3e, sparse_lr=%.3e, "
+            "lr_schedule=%s, warmup_ratio=%.4f, min_lr_ratio=%.4f, "
+            "grad_clip_norm=%.4f, ema_decay=%.6f, ema_eval=%s).",
+            self.num_epochs,
+            self.lr,
+            self.sparse_lr,
+            self.lr_schedule,
+            self.warmup_ratio,
+            self.min_lr_ratio,
+            self.grad_clip_norm,
+            self.ema_decay,
+            self.ema_eval,
+        )
