@@ -467,6 +467,31 @@ class MultiSeqQueryGenerator(nn.Module):
             ])
             for _ in range(num_sequences)
         ])
+        # Phase3: task-specific query paths.
+        self.ctr_query_path = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, d_model),
+                nn.LayerNorm(d_model),
+            )
+            for _ in range(num_sequences)
+        ])
+        self.cvr_query_path = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, d_model),
+                nn.LayerNorm(d_model),
+            )
+            for _ in range(num_sequences)
+        ])
+        # Sample-level click-aware gate (later can be upgraded to token-level gate).
+        self.cvr_click_gates = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model * 2, d_model),
+                nn.SiLU(),
+                nn.Linear(d_model, d_model),
+                nn.Sigmoid(),
+            )
+            for _ in range(num_sequences)
+        ])
 
     def _target_aware_topk_pool(
         self,
@@ -516,7 +541,7 @@ class MultiSeqQueryGenerator(nn.Module):
         seq_tokens_list: list,
         seq_padding_masks: list,
         target_item_token: torch.Tensor,
-    ) -> list:
+    ) -> tuple:
         """Generates query tokens for each sequence.
 
         Args:
@@ -531,7 +556,8 @@ class MultiSeqQueryGenerator(nn.Module):
         B = ns_tokens.shape[0]
         ns_flat = ns_tokens.view(B, -1)  # (B, M*D)
 
-        q_tokens_list = []
+        ctr_q_tokens_list = []
+        cvr_q_tokens_list = []
         for i in range(self.num_sequences):
             seq_pooled = self._target_aware_topk_pool(
                 target_item_token=target_item_token,
@@ -553,9 +579,14 @@ class MultiSeqQueryGenerator(nn.Module):
                 gate = self.query_anchor_gates[i][q_idx](torch.cat([q_base, target_item_token], dim=-1))
                 queries.append(q_base * gate + seq_anchor * (1.0 - gate))
             q_tokens = torch.stack(queries, dim=1)  # (B, Nq, D)
-            q_tokens_list.append(q_tokens)
+            ctr_q = self.ctr_query_path[i](q_tokens)
+            cvr_base = self.cvr_query_path[i](q_tokens)
+            click_gate = self.cvr_click_gates[i](torch.cat([seq_anchor, target_item_token], dim=-1)).unsqueeze(1)
+            cvr_q = cvr_base * click_gate + ctr_q * (1.0 - click_gate)
+            ctr_q_tokens_list.append(ctr_q)
+            cvr_q_tokens_list.append(cvr_q)
 
-        return q_tokens_list
+        return ctr_q_tokens_list, cvr_q_tokens_list
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1293,6 +1324,10 @@ class PCVRHyFormer(nn.Module):
         ns_tokenizer_type: str = 'rankmixer',
         user_ns_tokens: int = 0,
         item_ns_tokens: int = 0,
+        use_mmoe: bool = False,
+        mmoe_num_experts: int = 4,
+        use_cgc: bool = False,
+        cgc_task_experts: int = 2,
     ) -> None:
         super().__init__()
 
@@ -1308,6 +1343,10 @@ class PCVRHyFormer(nn.Module):
         self.emb_skip_threshold = emb_skip_threshold
         self.seq_id_threshold = seq_id_threshold
         self.ns_tokenizer_type = ns_tokenizer_type
+        self.use_mmoe = use_mmoe
+        self.mmoe_num_experts = mmoe_num_experts
+        self.use_cgc = use_cgc and use_mmoe
+        self.cgc_task_experts = cgc_task_experts
 
         # ================== NS Tokens Construction ==================
 
@@ -1442,6 +1481,7 @@ class PCVRHyFormer(nn.Module):
         # ================== Time Interval Bucket Embedding (optional) ==================
         if num_time_buckets > 0:
             self.time_embedding = nn.Embedding(num_time_buckets, d_model, padding_idx=0)
+            self.time_decay_embedding = nn.Embedding(num_time_buckets, d_model, padding_idx=0)
 
         # ================== HyFormer Components ==================
         # MultiSeqQueryGenerator
@@ -1488,6 +1528,42 @@ class PCVRHyFormer(nn.Module):
         self.emb_dropout = nn.Dropout(dropout_rate)
 
         # ESMM-style multi-task heads (CTR / CVR).
+        if self.use_mmoe:
+            self.mmoe_shared_experts = nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(d_model, d_model),
+                    nn.LayerNorm(d_model),
+                    nn.SiLU(),
+                    nn.Dropout(dropout_rate),
+                )
+                for _ in range(mmoe_num_experts)
+            ])
+            if self.use_cgc:
+                self.mmoe_ctr_experts = nn.ModuleList([
+                    nn.Sequential(
+                        nn.Linear(d_model, d_model),
+                        nn.LayerNorm(d_model),
+                        nn.SiLU(),
+                        nn.Dropout(dropout_rate),
+                    )
+                    for _ in range(cgc_task_experts)
+                ])
+                self.mmoe_cvr_experts = nn.ModuleList([
+                    nn.Sequential(
+                        nn.Linear(d_model, d_model),
+                        nn.LayerNorm(d_model),
+                        nn.SiLU(),
+                        nn.Dropout(dropout_rate),
+                    )
+                    for _ in range(cgc_task_experts)
+                ])
+                gate_dim = mmoe_num_experts + cgc_task_experts
+                self.ctr_gate = nn.Linear(d_model, gate_dim)
+                self.cvr_gate = nn.Linear(d_model, gate_dim)
+            else:
+                self.ctr_gate = nn.Linear(d_model, mmoe_num_experts)
+                self.cvr_gate = nn.Linear(d_model, mmoe_num_experts)
+
         self.ctr_head = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.LayerNorm(d_model),
@@ -1524,6 +1600,42 @@ class PCVRHyFormer(nn.Module):
                 if f > 0:
                     logging.info(f"emb_skip_threshold={emb_skip_threshold}: {name} skipped {f}/{t} features")
 
+    def _compute_task_representations(
+        self, shared_output: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Build task-specific representations for CTR/CVR.
+
+        Returns:
+            (ctr_repr, cvr_repr, ctr_gate_probs, cvr_gate_probs),
+            representations are (B, D), gate probs are (B, E) when MMoE is enabled.
+        """
+        if not self.use_mmoe:
+            return shared_output, shared_output, None, None
+
+        shared_expert_outs = torch.stack([expert(shared_output) for expert in self.mmoe_shared_experts], dim=1)
+        if self.use_cgc:
+            ctr_private_outs = torch.stack([expert(shared_output) for expert in self.mmoe_ctr_experts], dim=1)
+            cvr_private_outs = torch.stack([expert(shared_output) for expert in self.mmoe_cvr_experts], dim=1)
+
+            ctr_experts = torch.cat([shared_expert_outs, ctr_private_outs], dim=1)
+            cvr_experts = torch.cat([shared_expert_outs, cvr_private_outs], dim=1)
+            ctr_gate_probs = torch.softmax(self.ctr_gate(shared_output), dim=-1)
+            cvr_gate_probs = torch.softmax(self.cvr_gate(shared_output), dim=-1)
+            ctr_repr = torch.sum(ctr_gate_probs.unsqueeze(-1) * ctr_experts, dim=1)
+            cvr_repr = torch.sum(cvr_gate_probs.unsqueeze(-1) * cvr_experts, dim=1)
+            return ctr_repr, cvr_repr, ctr_gate_probs, cvr_gate_probs
+
+        ctr_gate_probs = torch.softmax(self.ctr_gate(shared_output), dim=-1)
+        cvr_gate_probs = torch.softmax(self.cvr_gate(shared_output), dim=-1)
+        ctr_repr = torch.sum(ctr_gate_probs.unsqueeze(-1) * shared_expert_outs, dim=1)
+        cvr_repr = torch.sum(cvr_gate_probs.unsqueeze(-1) * shared_expert_outs, dim=1)
+        return ctr_repr, cvr_repr, ctr_gate_probs, cvr_gate_probs
+
+    @staticmethod
+    def _esmm_coupled_logit(ctr_logit: torch.Tensor, cvr_logit: torch.Tensor) -> torch.Tensor:
+        ctcvr_prob = torch.sigmoid(ctr_logit) * torch.sigmoid(cvr_logit)
+        return torch.logit(ctcvr_prob.clamp(min=1e-6, max=1 - 1e-6))
+
     def _init_params(self) -> None:
         """Applies Xavier initialization to all embedding weights."""
         for domain in self.seq_domains:
@@ -1539,6 +1651,8 @@ class PCVRHyFormer(nn.Module):
         if self.num_time_buckets > 0:
             nn.init.xavier_normal_(self.time_embedding.weight.data)
             self.time_embedding.weight.data[0, :] = 0
+            nn.init.zeros_(self.time_decay_embedding.weight.data)
+            self.time_decay_embedding.weight.data[0, :] = 0
 
     def reinit_high_cardinality_params(
         self, cardinality_threshold: int = 10000
@@ -1642,7 +1756,8 @@ class PCVRHyFormer(nn.Module):
 
         # Add time bucket embedding (all-zero ids produce zero vectors via padding_idx=0)
         if self.num_time_buckets > 0:
-            token_emb = token_emb + self.time_embedding(time_bucket_ids)
+            decay = torch.sigmoid(self.time_decay_embedding(time_bucket_ids))
+            token_emb = token_emb * decay + self.time_embedding(time_bucket_ids)
 
         return token_emb
 
@@ -1744,29 +1859,78 @@ class PCVRHyFormer(nn.Module):
             seq_masks_list.append(mask)
 
         # 3. Generate independent Q tokens per sequence via MultiSeqQueryGenerator
-        q_tokens_list = self.query_generator(
+        ctr_q_tokens_list, cvr_q_tokens_list = self.query_generator(
             ns_tokens, seq_tokens_list, seq_masks_list, target_item_token
         )
 
         # 4. Dropout + MultiSeqHyFormerBlock stack + output projection
-        output = self._run_multi_seq_blocks(
-            q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
+        ctr_output = self._run_multi_seq_blocks(
+            ctr_q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
+            apply_dropout=self.training
+        )
+        cvr_output = self._run_multi_seq_blocks(
+            cvr_q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
             apply_dropout=self.training
         )
 
-        # 5. ESMM coupling: pCTCVR = sigmoid(ctr) * sigmoid(cvr)
-        ctr_logit = self.ctr_head(output)
-        cvr_logit = self.cvr_head(output)
-        ctcvr_prob = torch.sigmoid(ctr_logit) * torch.sigmoid(cvr_logit)
-        ctcvr_logit = torch.logit(ctcvr_prob.clamp(min=1e-6, max=1 - 1e-6))
+        # 5. ESMM coupling with optional MMoE task decoupling.
+        ctr_repr, _, _, _ = self._compute_task_representations(ctr_output)
+        _, cvr_repr, _, _ = self._compute_task_representations(cvr_output)
+        ctr_logit = self.ctr_head(ctr_repr)
+        cvr_logit = self.cvr_head(cvr_repr)
+        ctcvr_logit = self._esmm_coupled_logit(ctr_logit, cvr_logit)
         return ctcvr_logit
+
+    def forward_esmm(self, inputs: ModelInput) -> dict:
+        """Runs forward pass and returns ctr/cvr/ctcvr logits."""
+        user_ns = self.user_ns_tokenizer(inputs.user_int_feats)
+        item_ns = self.item_ns_tokenizer(inputs.item_int_feats)
+        ns_parts = [user_ns]
+        if self.has_user_dense:
+            user_dense_tok = F.silu(self.user_dense_proj(inputs.user_dense_feats)).unsqueeze(1)
+            ns_parts.append(user_dense_tok)
+        ns_parts.append(item_ns)
+        if self.has_item_dense:
+            item_dense_tok = F.silu(self.item_dense_proj(inputs.item_dense_feats)).unsqueeze(1)
+            ns_parts.append(item_dense_tok)
+        ns_tokens = torch.cat(ns_parts, dim=1)
+        item_anchor_parts = [item_ns.mean(dim=1)]
+        if self.has_item_dense:
+            item_anchor_parts.append(item_dense_tok.squeeze(1))
+        target_item_token = torch.stack(item_anchor_parts, dim=1).mean(dim=1)
+        seq_tokens_list, seq_masks_list = [], []
+        for domain in self.seq_domains:
+            tokens = self._embed_seq_domain(
+                inputs.seq_data[domain], self._seq_embs[domain], self._seq_proj[domain],
+                self._seq_is_id[domain], self._seq_emb_index[domain], inputs.seq_time_buckets[domain]
+            )
+            seq_tokens_list.append(tokens)
+            seq_masks_list.append(self._make_padding_mask(inputs.seq_lens[domain], inputs.seq_data[domain].shape[2]))
+        ctr_q_tokens_list, cvr_q_tokens_list = self.query_generator(
+            ns_tokens, seq_tokens_list, seq_masks_list, target_item_token
+        )
+        ctr_output = self._run_multi_seq_blocks(ctr_q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list, apply_dropout=self.training)
+        cvr_output = self._run_multi_seq_blocks(cvr_q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list, apply_dropout=self.training)
+        ctr_repr, _, ctr_gate_probs, _ = self._compute_task_representations(ctr_output)
+        _, cvr_repr, _, cvr_gate_probs = self._compute_task_representations(cvr_output)
+        ctr_logit = self.ctr_head(ctr_repr)
+        cvr_logit = self.cvr_head(cvr_repr)
+        ctcvr_logit = self._esmm_coupled_logit(ctr_logit, cvr_logit)
+        return {
+            'ctr_logit': ctr_logit,
+            'cvr_logit': cvr_logit,
+            'ctcvr_logit': ctcvr_logit,
+            'ctr_gate_probs': ctr_gate_probs,
+            'cvr_gate_probs': cvr_gate_probs,
+        }
 
 
     def predict_esmm(self, inputs: ModelInput) -> dict:
         """Returns ESMM outputs: ctr/cvr/ctcvr logits and probabilities."""
-        ctcvr_logit, emb = self.predict(inputs)
-        ctr_logit = self.ctr_head(emb)
-        cvr_logit = self.cvr_head(emb)
+        out = self.forward_esmm(inputs)
+        ctr_logit = out['ctr_logit']
+        cvr_logit = out['cvr_logit']
+        ctcvr_logit = out['ctcvr_logit']
         ctr_prob = torch.sigmoid(ctr_logit)
         cvr_prob = torch.sigmoid(cvr_logit)
         ctcvr_prob = torch.sigmoid(ctcvr_logit)
@@ -1812,17 +1976,23 @@ class PCVRHyFormer(nn.Module):
             mask = self._make_padding_mask(inputs.seq_lens[domain], inputs.seq_data[domain].shape[2])
             seq_masks_list.append(mask)
 
-        q_tokens_list = self.query_generator(
+        ctr_q_tokens_list, cvr_q_tokens_list = self.query_generator(
             ns_tokens, seq_tokens_list, seq_masks_list, target_item_token
         )
 
-        output = self._run_multi_seq_blocks(
-            q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
+        ctr_output = self._run_multi_seq_blocks(
+            ctr_q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
+            apply_dropout=False
+        )
+        cvr_output = self._run_multi_seq_blocks(
+            cvr_q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
             apply_dropout=False
         )
 
-        ctr_logit = self.ctr_head(output)
-        cvr_logit = self.cvr_head(output)
-        ctcvr_prob = torch.sigmoid(ctr_logit) * torch.sigmoid(cvr_logit)
-        ctcvr_logit = torch.logit(ctcvr_prob.clamp(min=1e-6, max=1 - 1e-6))
-        return ctcvr_logit, output
+        ctr_repr, _, _, _ = self._compute_task_representations(ctr_output)
+        _, cvr_repr, _, _ = self._compute_task_representations(cvr_output)
+        ctr_logit = self.ctr_head(ctr_repr)
+        cvr_logit = self.cvr_head(cvr_repr)
+        ctcvr_logit = self._esmm_coupled_logit(ctr_logit, cvr_logit)
+        # expose ctr path embedding for compatibility
+        return ctcvr_logit, ctr_output

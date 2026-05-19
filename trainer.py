@@ -58,6 +58,11 @@ class PCVRHyFormerRankingTrainer:
             ns_groups_path: Optional[str] = None,
             eval_every_n_steps: int = 0,
             train_config: Optional[Dict[str, Any]] = None,
+            esmm_multitask_loss: bool = False,
+            w_ctr: float = 1.0,
+            w_cvr: float = 1.0,
+            w_ctcvr: float = 0.5,
+            gate_entropy_reg: float = 0.0,
     ) -> None:
         self.model: nn.Module = model
         self.train_loader: DataLoader = train_loader
@@ -107,10 +112,18 @@ class PCVRHyFormerRankingTrainer:
         self.ckpt_params: Dict[str, Any] = ckpt_params or {}
         self.eval_every_n_steps: int = eval_every_n_steps
         self.train_config: Optional[Dict[str, Any]] = train_config
+        self.esmm_multitask_loss: bool = esmm_multitask_loss
+        self.w_ctr: float = w_ctr
+        self.w_cvr: float = w_cvr
+        self.w_ctcvr: float = w_ctcvr
+        self.gate_entropy_reg: float = gate_entropy_reg
 
         logging.info(f"PCVRHyFormerRankingTrainer loss_type={loss_type}, "
                      f"focal_alpha={focal_alpha}, focal_gamma={focal_gamma}, "
-                     f"reinit_sparse_after_epoch={reinit_sparse_after_epoch}")
+                     f"reinit_sparse_after_epoch={reinit_sparse_after_epoch}, "
+                     f"esmm_multitask_loss={esmm_multitask_loss}, "
+                     f"w_ctr={w_ctr}, w_cvr={w_cvr}, w_ctcvr={w_ctcvr}, "
+                     f"gate_entropy_reg={gate_entropy_reg}")
 
     def _build_step_dir_name(self, global_step: int, is_best: bool = False) -> str:
         """Build a checkpoint sub-directory name such as
@@ -403,19 +416,53 @@ class PCVRHyFormerRankingTrainer:
         """Run a single training step and return the scalar loss value."""
         device_batch = self._batch_to_device(batch)
         label = device_batch['label'].float()
+        click_label = device_batch.get('click_label', label).float()
 
         self.dense_optimizer.zero_grad()
         if self.sparse_optimizer is not None:
             self.sparse_optimizer.zero_grad()
 
         model_input = self._make_model_input(device_batch)
-        logits = self.model(model_input)  # (B, 1)
-        logits = logits.squeeze(-1)  # (B,)
+        if self.esmm_multitask_loss:
+            outputs = self.model.forward_esmm(model_input)
+            ctr_logit = outputs['ctr_logit'].squeeze(-1)
+            cvr_logit = outputs['cvr_logit'].squeeze(-1)
+            ctcvr_logit = outputs['ctcvr_logit'].squeeze(-1)
 
-        if self.loss_type == 'focal':
-            loss = sigmoid_focal_loss(logits, label, alpha=self.focal_alpha, gamma=self.focal_gamma)
+            if self.loss_type == 'focal':
+                l_ctr = sigmoid_focal_loss(ctr_logit, click_label, alpha=self.focal_alpha, gamma=self.focal_gamma)
+                l_ctcvr = sigmoid_focal_loss(ctcvr_logit, label, alpha=self.focal_alpha, gamma=self.focal_gamma)
+            else:
+                l_ctr = F.binary_cross_entropy_with_logits(ctr_logit, click_label)
+                l_ctcvr = F.binary_cross_entropy_with_logits(ctcvr_logit, label)
+
+            click_mask = click_label > 0.5
+            if click_mask.any():
+                if self.loss_type == 'focal':
+                    l_cvr = sigmoid_focal_loss(cvr_logit[click_mask], label[click_mask],
+                                               alpha=self.focal_alpha, gamma=self.focal_gamma)
+                else:
+                    l_cvr = F.binary_cross_entropy_with_logits(cvr_logit[click_mask], label[click_mask])
+            else:
+                l_cvr = torch.zeros((), device=self.device, dtype=l_ctr.dtype)
+
+            loss = self.w_ctr * l_ctr + self.w_cvr * l_cvr + self.w_ctcvr * l_ctcvr
+
+            if self.gate_entropy_reg > 0:
+                ctr_gate_probs = outputs.get('ctr_gate_probs')
+                cvr_gate_probs = outputs.get('cvr_gate_probs')
+                if ctr_gate_probs is not None and cvr_gate_probs is not None:
+                    eps = 1e-8
+                    ctr_ent = -(ctr_gate_probs * (ctr_gate_probs + eps).log()).sum(dim=-1).mean()
+                    cvr_ent = -(cvr_gate_probs * (cvr_gate_probs + eps).log()).sum(dim=-1).mean()
+                    # maximize entropy <=> minimize negative entropy
+                    loss = loss - self.gate_entropy_reg * 0.5 * (ctr_ent + cvr_ent)
         else:
-            loss = F.binary_cross_entropy_with_logits(logits, label)
+            logits = self.model(model_input).squeeze(-1)  # (B,)
+            if self.loss_type == 'focal':
+                loss = sigmoid_focal_loss(logits, label, alpha=self.focal_alpha, gamma=self.focal_gamma)
+            else:
+                loss = F.binary_cross_entropy_with_logits(logits, label)
         loss.backward()
         # foreach=False: avoids a PyTorch _foreach_norm CUDA kernel bug observed
         # with certain tensor shapes in this project.
