@@ -427,17 +427,32 @@ class MultiSeqQueryGenerator(nn.Module):
         num_ns: int,
         num_queries: int,
         num_sequences: int,
-        hidden_mult: int = 4
+        hidden_mult: int = 4,
+        query_top_k: int = 32,
     ) -> None:
         super().__init__()
         self.num_queries = num_queries
         self.num_sequences = num_sequences
         self.d_model = d_model
+        self.query_top_k = query_top_k
 
-        global_info_dim = (num_ns + 1) * d_model
+        global_info_dim = (num_ns + 2) * d_model
 
         # LayerNorm on global_info to prevent gradient explosion from large-dim concat
         self.global_info_norm = nn.LayerNorm(global_info_dim)
+        self.seq_anchor_proj = nn.ModuleList([
+            nn.Linear(d_model * 2, d_model) for _ in range(num_sequences)
+        ])
+        self.query_anchor_gates = nn.ModuleList([
+            nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(d_model * 2, d_model),
+                    nn.Sigmoid(),
+                )
+                for _ in range(num_queries)
+            ])
+            for _ in range(num_sequences)
+        ])
 
         # Each sequence has N independent FFNs
         self.query_ffns_per_seq = nn.ModuleList([
@@ -453,11 +468,54 @@ class MultiSeqQueryGenerator(nn.Module):
             for _ in range(num_sequences)
         ])
 
+    def _target_aware_topk_pool(
+        self,
+        target_item_token: torch.Tensor,
+        seq_tokens: torch.Tensor,
+        seq_padding_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Pool sequence with target-aware Top-K attention."""
+        logits = torch.einsum("bd,bld->bl", target_item_token, seq_tokens)
+        logits = logits.masked_fill(seq_padding_mask, float("-inf"))
+
+        valid_count = (~seq_padding_mask).sum(dim=1)
+        B, _, D = seq_tokens.shape
+        ctx = torch.zeros(B, D, device=seq_tokens.device, dtype=seq_tokens.dtype)
+
+        non_empty = valid_count > 0
+        if non_empty.any():
+            rows = torch.where(non_empty)[0]
+            cur_logits = logits[rows]
+            cur_tokens = seq_tokens[rows]
+            cur_valid_count = valid_count[rows]
+
+            k_max = int(min(self.query_top_k, cur_tokens.shape[1]))
+            topk_vals, topk_idx = torch.topk(cur_logits, k=k_max, dim=1)
+            topk_tokens = torch.gather(
+                cur_tokens,
+                dim=1,
+                index=topk_idx.unsqueeze(-1).expand(-1, -1, D),
+            )
+
+            k_pos = torch.arange(k_max, device=cur_tokens.device).unsqueeze(0)
+            effective_k = torch.clamp(cur_valid_count, max=k_max).unsqueeze(1)
+            topk_pad = k_pos >= effective_k
+            topk_vals = topk_vals.masked_fill(topk_pad, float("-inf"))
+
+            attn = torch.softmax(topk_vals, dim=1)
+            attn = torch.where(topk_pad, torch.zeros_like(attn), attn)
+            attn = attn / attn.sum(dim=1, keepdim=True).clamp(min=1e-9)
+            cur_ctx = torch.einsum("bk,bkd->bd", attn, topk_tokens)
+            ctx[rows] = cur_ctx
+
+        return ctx
+
     def forward(
         self,
         ns_tokens: torch.Tensor,
         seq_tokens_list: list,
-        seq_padding_masks: list
+        seq_padding_masks: list,
+        target_item_token: torch.Tensor,
     ) -> list:
         """Generates query tokens for each sequence.
 
@@ -475,19 +533,25 @@ class MultiSeqQueryGenerator(nn.Module):
 
         q_tokens_list = []
         for i in range(self.num_sequences):
-            # MeanPool(Seq_i)
-            valid_mask = ~seq_padding_masks[i]  # True = valid
-            valid_mask_expanded = valid_mask.unsqueeze(-1).float()  # (B, L_i, 1)
-            seq_sum = (seq_tokens_list[i] * valid_mask_expanded).sum(dim=1)  # (B, D)
-            seq_count = valid_mask_expanded.sum(dim=1).clamp(min=1)  # (B, 1)
-            seq_pooled = seq_sum / seq_count  # (B, D)
+            seq_pooled = self._target_aware_topk_pool(
+                target_item_token=target_item_token,
+                seq_tokens=seq_tokens_list[i],
+                seq_padding_mask=seq_padding_masks[i],
+            )
 
-            # GlobalInfo_i = Concat(NS_flat, seq_pooled_i)
-            global_info = torch.cat([ns_flat, seq_pooled], dim=-1)  # (B, (M+1)*D)
+            # Target-aware anchor: merge sequence summary and target item embedding.
+            seq_anchor = self.seq_anchor_proj[i](torch.cat([seq_pooled, target_item_token], dim=-1))
+
+            # GlobalInfo_i = Concat(NS_flat, seq_pooled_i, target_anchor_i)
+            global_info = torch.cat([ns_flat, seq_pooled, seq_anchor], dim=-1)  # (B, (M+2)*D)
             global_info = self.global_info_norm(global_info)
 
-            # Generate N query tokens
-            queries = [ffn(global_info) for ffn in self.query_ffns_per_seq[i]]
+            # Generate N query tokens with query-wise target gates to improve diversity.
+            queries = []
+            for q_idx, ffn in enumerate(self.query_ffns_per_seq[i]):
+                q_base = ffn(global_info)
+                gate = self.query_anchor_gates[i][q_idx](torch.cat([q_base, target_item_token], dim=-1))
+                queries.append(q_base * gate + seq_anchor * (1.0 - gate))
             q_tokens = torch.stack(queries, dim=1)  # (B, Nq, D)
             q_tokens_list.append(q_tokens)
 
@@ -1296,6 +1360,8 @@ class PCVRHyFormer(nn.Module):
             raise ValueError(f"Unknown ns_tokenizer_type: {ns_tokenizer_type}")
 
         # User dense feature projection (if available)
+        self.num_user_ns = num_user_ns
+        self.num_item_ns = num_item_ns
         self.has_user_dense = user_dense_dim > 0
         if self.has_user_dense:
             self.user_dense_proj = nn.Sequential(
@@ -1421,13 +1487,20 @@ class PCVRHyFormer(nn.Module):
         # Dropout
         self.emb_dropout = nn.Dropout(dropout_rate)
 
-        # Classifier
-        self.clsfier = nn.Sequential(
+        # ESMM-style multi-task heads (CTR / CVR).
+        self.ctr_head = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.LayerNorm(d_model),
             nn.SiLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(d_model, action_num)
+            nn.Linear(d_model, 1)
+        )
+        self.cvr_head = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.LayerNorm(d_model),
+            nn.SiLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(d_model, 1)
         )
 
         # Initialize parameters
@@ -1632,7 +1705,12 @@ class PCVRHyFormer(nn.Module):
         return output
 
     def forward(self, inputs: ModelInput) -> torch.Tensor:
-        """Runs the forward pass of the PCVRHyFormer model."""
+        """Runs forward pass and returns impression-space conversion logit.
+
+        The model internally predicts ``ctr_logit`` and ``cvr_logit``. The
+        public ``forward`` keeps backward compatibility by returning a single
+        logit corresponding to ``P(conversion|impression)`` via ESMM coupling.
+        """
         # 1. NS tokens: grouped projection
         user_ns = self.user_ns_tokenizer(inputs.user_int_feats)   # (B, num_user_groups, D)
         item_ns = self.item_ns_tokenizer(inputs.item_int_feats)   # (B, num_item_groups, D)
@@ -1647,6 +1725,10 @@ class PCVRHyFormer(nn.Module):
             ns_parts.append(item_dense_tok)
 
         ns_tokens = torch.cat(ns_parts, dim=1)  # (B, num_ns, D)
+        item_anchor_parts = [item_ns.mean(dim=1)]
+        if self.has_item_dense:
+            item_anchor_parts.append(item_dense_tok.squeeze(1))
+        target_item_token = torch.stack(item_anchor_parts, dim=1).mean(dim=1)
 
         # 2. Embed each sequence domain (dynamic)
         seq_tokens_list = []
@@ -1662,7 +1744,9 @@ class PCVRHyFormer(nn.Module):
             seq_masks_list.append(mask)
 
         # 3. Generate independent Q tokens per sequence via MultiSeqQueryGenerator
-        q_tokens_list = self.query_generator(ns_tokens, seq_tokens_list, seq_masks_list)
+        q_tokens_list = self.query_generator(
+            ns_tokens, seq_tokens_list, seq_masks_list, target_item_token
+        )
 
         # 4. Dropout + MultiSeqHyFormerBlock stack + output projection
         output = self._run_multi_seq_blocks(
@@ -1670,12 +1754,44 @@ class PCVRHyFormer(nn.Module):
             apply_dropout=self.training
         )
 
-        # 5. Classifier
-        logits = self.clsfier(output)  # (B, action_num)
-        return logits
+        # 5. ESMM coupling: pCTCVR = sigmoid(ctr) * sigmoid(cvr)
+        ctr_logit = self.ctr_head(output)
+        cvr_logit = self.cvr_head(output)
+        ctcvr_prob = torch.sigmoid(ctr_logit) * torch.sigmoid(cvr_logit)
+        ctcvr_logit = torch.logit(ctcvr_prob.clamp(min=1e-6, max=1 - 1e-6))
+        return ctcvr_logit
+
+    def forward_esmm(self, inputs: ModelInput) -> dict:
+        """Runs forward pass and returns ctr/cvr/ctcvr logits."""
+        ctcvr_logit, emb = self.predict(inputs)
+        ctr_logit = self.ctr_head(emb)
+        cvr_logit = self.cvr_head(emb)
+        return {
+            'ctr_logit': ctr_logit,
+            'cvr_logit': cvr_logit,
+            'ctcvr_logit': ctcvr_logit,
+        }
+
+
+    def predict_esmm(self, inputs: ModelInput) -> dict:
+        """Returns ESMM outputs: ctr/cvr/ctcvr logits and probabilities."""
+        ctcvr_logit, emb = self.predict(inputs)
+        ctr_logit = self.ctr_head(emb)
+        cvr_logit = self.cvr_head(emb)
+        ctr_prob = torch.sigmoid(ctr_logit)
+        cvr_prob = torch.sigmoid(cvr_logit)
+        ctcvr_prob = torch.sigmoid(ctcvr_logit)
+        return {
+            'ctr_logit': ctr_logit,
+            'cvr_logit': cvr_logit,
+            'ctcvr_logit': ctcvr_logit,
+            'ctr_prob': ctr_prob,
+            'cvr_prob': cvr_prob,
+            'ctcvr_prob': ctcvr_prob,
+        }
 
     def predict(self, inputs: ModelInput) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Runs inference without dropout, returning both logits and embeddings."""
+        """Runs inference without dropout, returning ctcvr logits + embeddings."""
         # Reuses forward logic but without dropout
         user_ns = self.user_ns_tokenizer(inputs.user_int_feats)
         item_ns = self.item_ns_tokenizer(inputs.item_int_feats)
@@ -1690,6 +1806,10 @@ class PCVRHyFormer(nn.Module):
             ns_parts.append(item_dense_tok)
 
         ns_tokens = torch.cat(ns_parts, dim=1)
+        item_anchor_parts = [item_ns.mean(dim=1)]
+        if self.has_item_dense:
+            item_anchor_parts.append(item_dense_tok.squeeze(1))
+        target_item_token = torch.stack(item_anchor_parts, dim=1).mean(dim=1)
 
         seq_tokens_list = []
         seq_masks_list = []
@@ -1703,12 +1823,17 @@ class PCVRHyFormer(nn.Module):
             mask = self._make_padding_mask(inputs.seq_lens[domain], inputs.seq_data[domain].shape[2])
             seq_masks_list.append(mask)
 
-        q_tokens_list = self.query_generator(ns_tokens, seq_tokens_list, seq_masks_list)
+        q_tokens_list = self.query_generator(
+            ns_tokens, seq_tokens_list, seq_masks_list, target_item_token
+        )
 
         output = self._run_multi_seq_blocks(
             q_tokens_list, ns_tokens, seq_tokens_list, seq_masks_list,
             apply_dropout=False
         )
 
-        logits = self.clsfier(output)
-        return logits, output
+        ctr_logit = self.ctr_head(output)
+        cvr_logit = self.cvr_head(output)
+        ctcvr_prob = torch.sigmoid(ctr_logit) * torch.sigmoid(cvr_logit)
+        ctcvr_logit = torch.logit(ctcvr_prob.clamp(min=1e-6, max=1 - 1e-6))
+        return ctcvr_logit, output
