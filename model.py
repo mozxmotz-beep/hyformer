@@ -72,9 +72,9 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 def apply_rope_to_tensor(
-    x: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
 ) -> torch.Tensor:
     """Applies Rotary Position Embedding to a single tensor.
 
@@ -123,11 +123,11 @@ class RoPEMultiheadAttention(nn.Module):
     """
 
     def __init__(
-        self,
-        d_model: int,
-        num_heads: int,
-        dropout: float = 0.0,
-        rope_on_q: bool = True,
+            self,
+            d_model: int,
+            num_heads: int,
+            dropout: float = 0.0,
+            rope_on_q: bool = True,
     ) -> None:
         super().__init__()
         self.d_model = d_model
@@ -148,17 +148,17 @@ class RoPEMultiheadAttention(nn.Module):
         nn.init.constant_(self.W_g.bias, 1.0)
 
     def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        key_padding_mask: Optional[torch.Tensor] = None,
-        attn_mask: Optional[torch.Tensor] = None,
-        rope_cos: Optional[torch.Tensor] = None,
-        rope_sin: Optional[torch.Tensor] = None,
-        q_rope_cos: Optional[torch.Tensor] = None,
-        q_rope_sin: Optional[torch.Tensor] = None,
-        need_weights: bool = False,
+            self,
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            key_padding_mask: Optional[torch.Tensor] = None,
+            attn_mask: Optional[torch.Tensor] = None,
+            rope_cos: Optional[torch.Tensor] = None,
+            rope_sin: Optional[torch.Tensor] = None,
+            q_rope_cos: Optional[torch.Tensor] = None,
+            q_rope_sin: Optional[torch.Tensor] = None,
+            need_weights: bool = False,
     ) -> tuple:
         """Computes multi-head attention with optional RoPE.
 
@@ -249,11 +249,11 @@ class CrossAttention(nn.Module):
     """
 
     def __init__(
-        self,
-        d_model: int,
-        num_heads: int,
-        dropout: float = 0.0,
-        ln_mode: str = 'pre'
+            self,
+            d_model: int,
+            num_heads: int,
+            dropout: float = 0.0,
+            ln_mode: str = 'pre'
     ) -> None:
         super().__init__()
         self.ln_mode = ln_mode
@@ -270,12 +270,12 @@ class CrossAttention(nn.Module):
             self.norm_kv = nn.LayerNorm(d_model)
 
     def forward(
-        self,
-        query: torch.Tensor,
-        key_value: torch.Tensor,
-        key_padding_mask: Optional[torch.Tensor] = None,
-        rope_cos: Optional[torch.Tensor] = None,
-        rope_sin: Optional[torch.Tensor] = None,
+            self,
+            query: torch.Tensor,
+            key_value: torch.Tensor,
+            key_padding_mask: Optional[torch.Tensor] = None,
+            rope_cos: Optional[torch.Tensor] = None,
+            rope_sin: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Computes cross-attention between query tokens and sequence tokens.
 
@@ -324,12 +324,12 @@ class RankMixerBlock(nn.Module):
     """
 
     def __init__(
-        self,
-        d_model: int,
-        n_total: int,  # T = Nq + Nns
-        hidden_mult: int = 4,
-        dropout: float = 0.0,
-        mode: str = 'full'  # 'full' | 'ffn_only' | 'none'
+            self,
+            d_model: int,
+            n_total: int,  # T = Nq + Nns
+            hidden_mult: int = 4,
+            dropout: float = 0.0,
+            mode: str = 'full'  # 'full' | 'ffn_only' | 'none'
     ) -> None:
         super().__init__()
         self.T = n_total
