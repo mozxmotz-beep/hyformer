@@ -36,28 +36,32 @@ class PCVRHyFormerRankingTrainer:
     """
 
     def __init__(
-        self,
-        model: nn.Module,
-        train_loader: DataLoader,
-        valid_loader: DataLoader,
-        lr: float,
-        num_epochs: int,
-        device: str,
-        save_dir: str,
-        early_stopping: EarlyStopping,
-        loss_type: str = 'bce',
-        focal_alpha: float = 0.1,
-        focal_gamma: float = 2.0,
-        sparse_lr: float = 0.05,
-        sparse_weight_decay: float = 0.0,
-        reinit_sparse_after_epoch: int = 1,
-        reinit_cardinality_threshold: int = 0,
-        ckpt_params: Optional[Dict[str, Any]] = None,
-        writer: Optional[Any] = None,
-        schema_path: Optional[str] = None,
-        ns_groups_path: Optional[str] = None,
-        eval_every_n_steps: int = 0,
-        train_config: Optional[Dict[str, Any]] = None,
+            self,
+            model: nn.Module,
+            train_loader: DataLoader,
+            valid_loader: DataLoader,
+            lr: float,
+            num_epochs: int,
+            device: str,
+            save_dir: str,
+            early_stopping: EarlyStopping,
+            loss_type: str = 'bce',
+            focal_alpha: float = 0.1,
+            focal_gamma: float = 2.0,
+            sparse_lr: float = 0.05,
+            sparse_weight_decay: float = 0.0,
+            reinit_sparse_after_epoch: int = 1,
+            reinit_cardinality_threshold: int = 0,
+            ckpt_params: Optional[Dict[str, Any]] = None,
+            writer: Optional[Any] = None,
+            schema_path: Optional[str] = None,
+            ns_groups_path: Optional[str] = None,
+            eval_every_n_steps: int = 0,
+            train_config: Optional[Dict[str, Any]] = None,
+            esmm_multitask_loss: bool = False,
+            w_ctr: float = 1.0,
+            w_cvr: float = 1.0,
+            w_ctcvr: float = 0.5,
     ) -> None:
         self.model: nn.Module = model
         self.train_loader: DataLoader = train_loader
@@ -107,10 +111,16 @@ class PCVRHyFormerRankingTrainer:
         self.ckpt_params: Dict[str, Any] = ckpt_params or {}
         self.eval_every_n_steps: int = eval_every_n_steps
         self.train_config: Optional[Dict[str, Any]] = train_config
+        self.esmm_multitask_loss: bool = esmm_multitask_loss
+        self.w_ctr: float = w_ctr
+        self.w_cvr: float = w_cvr
+        self.w_ctcvr: float = w_ctcvr
 
         logging.info(f"PCVRHyFormerRankingTrainer loss_type={loss_type}, "
                      f"focal_alpha={focal_alpha}, focal_gamma={focal_gamma}, "
-                     f"reinit_sparse_after_epoch={reinit_sparse_after_epoch}")
+                     f"reinit_sparse_after_epoch={reinit_sparse_after_epoch}, "
+                     f"esmm_multitask_loss={esmm_multitask_loss}, "
+                     f"w_ctr={w_ctr}, w_cvr={w_cvr}, w_ctcvr={w_ctcvr}")
 
     def _build_step_dir_name(self, global_step: int, is_best: bool = False) -> str:
         """Build a checkpoint sub-directory name such as
@@ -168,10 +178,10 @@ class PCVRHyFormerRankingTrainer:
                 json.dump(cfg_to_dump, f, indent=2)
 
     def _save_step_checkpoint(
-        self,
-        global_step: int,
-        is_best: bool = False,
-        skip_model_file: bool = False,
+            self,
+            global_step: int,
+            is_best: bool = False,
+            skip_model_file: bool = False,
     ) -> str:
         """Save ``model.pt`` plus sidecar files under a ``global_step`` sub-dir.
 
@@ -216,10 +226,10 @@ class PCVRHyFormerRankingTrainer:
         return device_batch
 
     def _handle_validation_result(
-        self,
-        total_step: int,
-        val_auc: float,
-        val_logloss: float,
+            self,
+            total_step: int,
+            val_auc: float,
+            val_logloss: float,
     ) -> None:
         """Persist a new-best checkpoint atomically.
 
@@ -246,8 +256,8 @@ class PCVRHyFormerRankingTrainer:
         """
         old_best = self.early_stopping.best_score
         is_likely_new_best = (
-            old_best is None
-            or val_auc > old_best + self.early_stopping.delta
+                old_best is None
+                or val_auc > old_best + self.early_stopping.delta
         )
         if not is_likely_new_best:
             # No new best anticipated: leave disk untouched. The previous
@@ -281,7 +291,7 @@ class PCVRHyFormerRankingTrainer:
         # but EarlyStopping internally declined to save, skip to avoid
         # creating an empty (sidecar-only) checkpoint directory.
         if self.early_stopping.best_score != old_best and os.path.exists(
-            self.early_stopping.checkpoint_path
+                self.early_stopping.checkpoint_path
         ):
             self._save_step_checkpoint(
                 total_step, is_best=True, skip_model_file=True)
@@ -403,19 +413,43 @@ class PCVRHyFormerRankingTrainer:
         """Run a single training step and return the scalar loss value."""
         device_batch = self._batch_to_device(batch)
         label = device_batch['label'].float()
+        click_label = device_batch.get('click_label', label).float()
 
         self.dense_optimizer.zero_grad()
         if self.sparse_optimizer is not None:
             self.sparse_optimizer.zero_grad()
 
         model_input = self._make_model_input(device_batch)
-        logits = self.model(model_input)  # (B, 1)
-        logits = logits.squeeze(-1)  # (B,)
+        if self.esmm_multitask_loss:
+            outputs = self.model.forward_esmm(model_input)
+            ctr_logit = outputs['ctr_logit'].squeeze(-1)
+            cvr_logit = outputs['cvr_logit'].squeeze(-1)
+            ctcvr_logit = outputs['ctcvr_logit'].squeeze(-1)
 
-        if self.loss_type == 'focal':
-            loss = sigmoid_focal_loss(logits, label, alpha=self.focal_alpha, gamma=self.focal_gamma)
+            if self.loss_type == 'focal':
+                l_ctr = sigmoid_focal_loss(ctr_logit, click_label, alpha=self.focal_alpha, gamma=self.focal_gamma)
+                l_ctcvr = sigmoid_focal_loss(ctcvr_logit, label, alpha=self.focal_alpha, gamma=self.focal_gamma)
+            else:
+                l_ctr = F.binary_cross_entropy_with_logits(ctr_logit, click_label)
+                l_ctcvr = F.binary_cross_entropy_with_logits(ctcvr_logit, label)
+
+            click_mask = click_label > 0.5
+            if click_mask.any():
+                if self.loss_type == 'focal':
+                    l_cvr = sigmoid_focal_loss(cvr_logit[click_mask], label[click_mask],
+                                               alpha=self.focal_alpha, gamma=self.focal_gamma)
+                else:
+                    l_cvr = F.binary_cross_entropy_with_logits(cvr_logit[click_mask], label[click_mask])
+            else:
+                l_cvr = torch.zeros((), device=self.device, dtype=l_ctr.dtype)
+
+            loss = self.w_ctr * l_ctr + self.w_cvr * l_cvr + self.w_ctcvr * l_ctcvr
         else:
-            loss = F.binary_cross_entropy_with_logits(logits, label)
+            logits = self.model(model_input).squeeze(-1)  # (B,)
+            if self.loss_type == 'focal':
+                loss = sigmoid_focal_loss(logits, label, alpha=self.focal_alpha, gamma=self.focal_gamma)
+            else:
+                loss = F.binary_cross_entropy_with_logits(logits, label)
         loss.backward()
         # foreach=False: avoids a PyTorch _foreach_norm CUDA kernel bug observed
         # with certain tensor shapes in this project.
@@ -481,7 +515,7 @@ class PCVRHyFormerRankingTrainer:
         return auc, logloss
 
     def _evaluate_step(
-        self, batch: Dict[str, Any]
+            self, batch: Dict[str, Any]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Run a single validation step and return ``(logits, labels)``."""
         device_batch = self._batch_to_device(batch)
