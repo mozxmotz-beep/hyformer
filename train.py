@@ -25,8 +25,8 @@ from trainer import PCVRHyFormerRankingTrainer
 
 
 def build_feature_specs(
-    schema: FeatureSchema,
-    per_position_vocab_sizes: List[int],
+        schema: FeatureSchema,
+        per_position_vocab_sizes: List[int],
 ) -> List[Tuple[int, int, int]]:
     """Build feature_specs of the form ``[(vocab_size, offset, length), ...]``
     ordered by the positions recorded in ``schema.entries``.
@@ -143,6 +143,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--focal_gamma', type=float, default=2.0,
                         help='Focal Loss focusing parameter gamma '
                              '(effective only when --loss_type=focal)')
+    parser.add_argument('--esmm_multitask_loss', action='store_true', default=False,
+                        help='Enable ESMM multi-task supervision: CTR/CVR/CTCVR joint losses')
+    parser.add_argument('--w_ctr', type=float, default=1.0,
+                        help='Weight of CTR loss when --esmm_multitask_loss is enabled')
+    parser.add_argument('--w_cvr', type=float, default=1.0,
+                        help='Weight of CVR loss when --esmm_multitask_loss is enabled')
+    parser.add_argument('--w_ctcvr', type=float, default=0.5,
+                        help='Weight of CTCVR loss when --esmm_multitask_loss is enabled')
 
     # Sparse optimizer.
     parser.add_argument('--sparse_lr', type=float, default=0.05,
@@ -350,6 +358,10 @@ def main() -> None:
         ns_groups_path=args.ns_groups_json if args.ns_groups_json and os.path.exists(args.ns_groups_json) else None,
         eval_every_n_steps=args.eval_every_n_steps,
         train_config=vars(args),
+        esmm_multitask_loss=args.esmm_multitask_loss,
+        w_ctr=args.w_ctr,
+        w_cvr=args.w_cvr,
+        w_ctcvr=args.w_ctcvr,
     )
 
     trainer.train()
