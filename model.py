@@ -1293,6 +1293,10 @@ class PCVRHyFormer(nn.Module):
         ns_tokenizer_type: str = 'rankmixer',
         user_ns_tokens: int = 0,
         item_ns_tokens: int = 0,
+        use_mmoe: bool = False,
+        mmoe_num_experts: int = 4,
+        use_cgc: bool = False,
+        cgc_task_experts: int = 2,
     ) -> None:
         super().__init__()
 
@@ -1308,6 +1312,10 @@ class PCVRHyFormer(nn.Module):
         self.emb_skip_threshold = emb_skip_threshold
         self.seq_id_threshold = seq_id_threshold
         self.ns_tokenizer_type = ns_tokenizer_type
+        self.use_mmoe = use_mmoe
+        self.mmoe_num_experts = mmoe_num_experts
+        self.use_cgc = use_cgc and use_mmoe
+        self.cgc_task_experts = cgc_task_experts
 
         # ================== NS Tokens Construction ==================
 
@@ -1488,6 +1496,42 @@ class PCVRHyFormer(nn.Module):
         self.emb_dropout = nn.Dropout(dropout_rate)
 
         # ESMM-style multi-task heads (CTR / CVR).
+        if self.use_mmoe:
+            self.mmoe_shared_experts = nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(d_model, d_model),
+                    nn.LayerNorm(d_model),
+                    nn.SiLU(),
+                    nn.Dropout(dropout_rate),
+                )
+                for _ in range(mmoe_num_experts)
+            ])
+            if self.use_cgc:
+                self.mmoe_ctr_experts = nn.ModuleList([
+                    nn.Sequential(
+                        nn.Linear(d_model, d_model),
+                        nn.LayerNorm(d_model),
+                        nn.SiLU(),
+                        nn.Dropout(dropout_rate),
+                    )
+                    for _ in range(cgc_task_experts)
+                ])
+                self.mmoe_cvr_experts = nn.ModuleList([
+                    nn.Sequential(
+                        nn.Linear(d_model, d_model),
+                        nn.LayerNorm(d_model),
+                        nn.SiLU(),
+                        nn.Dropout(dropout_rate),
+                    )
+                    for _ in range(cgc_task_experts)
+                ])
+                gate_dim = mmoe_num_experts + cgc_task_experts
+                self.ctr_gate = nn.Linear(d_model, gate_dim)
+                self.cvr_gate = nn.Linear(d_model, gate_dim)
+            else:
+                self.ctr_gate = nn.Linear(d_model, mmoe_num_experts)
+                self.cvr_gate = nn.Linear(d_model, mmoe_num_experts)
+
         self.ctr_head = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.LayerNorm(d_model),
@@ -1523,6 +1567,42 @@ class PCVRHyFormer(nn.Module):
                 t = len(tokenizer._emb_index)
                 if f > 0:
                     logging.info(f"emb_skip_threshold={emb_skip_threshold}: {name} skipped {f}/{t} features")
+
+    def _compute_task_representations(
+        self, shared_output: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Build task-specific representations for CTR/CVR.
+
+        Returns:
+            (ctr_repr, cvr_repr, ctr_gate_probs, cvr_gate_probs),
+            representations are (B, D), gate probs are (B, E) when MMoE is enabled.
+        """
+        if not self.use_mmoe:
+            return shared_output, shared_output, None, None
+
+        shared_expert_outs = torch.stack([expert(shared_output) for expert in self.mmoe_shared_experts], dim=1)
+        if self.use_cgc:
+            ctr_private_outs = torch.stack([expert(shared_output) for expert in self.mmoe_ctr_experts], dim=1)
+            cvr_private_outs = torch.stack([expert(shared_output) for expert in self.mmoe_cvr_experts], dim=1)
+
+            ctr_experts = torch.cat([shared_expert_outs, ctr_private_outs], dim=1)
+            cvr_experts = torch.cat([shared_expert_outs, cvr_private_outs], dim=1)
+            ctr_gate_probs = torch.softmax(self.ctr_gate(shared_output), dim=-1)
+            cvr_gate_probs = torch.softmax(self.cvr_gate(shared_output), dim=-1)
+            ctr_repr = torch.sum(ctr_gate_probs.unsqueeze(-1) * ctr_experts, dim=1)
+            cvr_repr = torch.sum(cvr_gate_probs.unsqueeze(-1) * cvr_experts, dim=1)
+            return ctr_repr, cvr_repr, ctr_gate_probs, cvr_gate_probs
+
+        ctr_gate_probs = torch.softmax(self.ctr_gate(shared_output), dim=-1)
+        cvr_gate_probs = torch.softmax(self.cvr_gate(shared_output), dim=-1)
+        ctr_repr = torch.sum(ctr_gate_probs.unsqueeze(-1) * shared_expert_outs, dim=1)
+        cvr_repr = torch.sum(cvr_gate_probs.unsqueeze(-1) * shared_expert_outs, dim=1)
+        return ctr_repr, cvr_repr, ctr_gate_probs, cvr_gate_probs
+
+    @staticmethod
+    def _esmm_coupled_logit(ctr_logit: torch.Tensor, cvr_logit: torch.Tensor) -> torch.Tensor:
+        ctcvr_prob = torch.sigmoid(ctr_logit) * torch.sigmoid(cvr_logit)
+        return torch.logit(ctcvr_prob.clamp(min=1e-6, max=1 - 1e-6))
 
     def _init_params(self) -> None:
         """Applies Xavier initialization to all embedding weights."""
@@ -1754,19 +1834,35 @@ class PCVRHyFormer(nn.Module):
             apply_dropout=self.training
         )
 
-        # 5. ESMM coupling: pCTCVR = sigmoid(ctr) * sigmoid(cvr)
-        ctr_logit = self.ctr_head(output)
-        cvr_logit = self.cvr_head(output)
-        ctcvr_prob = torch.sigmoid(ctr_logit) * torch.sigmoid(cvr_logit)
-        ctcvr_logit = torch.logit(ctcvr_prob.clamp(min=1e-6, max=1 - 1e-6))
+        # 5. ESMM coupling with optional MMoE task decoupling.
+        ctr_repr, cvr_repr, _, _ = self._compute_task_representations(output)
+        ctr_logit = self.ctr_head(ctr_repr)
+        cvr_logit = self.cvr_head(cvr_repr)
+        ctcvr_logit = self._esmm_coupled_logit(ctr_logit, cvr_logit)
         return ctcvr_logit
+
+    def forward_esmm(self, inputs: ModelInput) -> dict:
+        """Runs forward pass and returns ctr/cvr/ctcvr logits."""
+        _, emb = self.predict(inputs)
+        ctr_repr, cvr_repr, ctr_gate_probs, cvr_gate_probs = self._compute_task_representations(emb)
+        ctr_logit = self.ctr_head(ctr_repr)
+        cvr_logit = self.cvr_head(cvr_repr)
+        ctcvr_logit = self._esmm_coupled_logit(ctr_logit, cvr_logit)
+        return {
+            'ctr_logit': ctr_logit,
+            'cvr_logit': cvr_logit,
+            'ctcvr_logit': ctcvr_logit,
+            'ctr_gate_probs': ctr_gate_probs,
+            'cvr_gate_probs': cvr_gate_probs,
+        }
 
 
     def predict_esmm(self, inputs: ModelInput) -> dict:
         """Returns ESMM outputs: ctr/cvr/ctcvr logits and probabilities."""
         ctcvr_logit, emb = self.predict(inputs)
-        ctr_logit = self.ctr_head(emb)
-        cvr_logit = self.cvr_head(emb)
+        ctr_repr, cvr_repr, _, _ = self._compute_task_representations(emb)
+        ctr_logit = self.ctr_head(ctr_repr)
+        cvr_logit = self.cvr_head(cvr_repr)
         ctr_prob = torch.sigmoid(ctr_logit)
         cvr_prob = torch.sigmoid(cvr_logit)
         ctcvr_prob = torch.sigmoid(ctcvr_logit)
@@ -1821,8 +1917,8 @@ class PCVRHyFormer(nn.Module):
             apply_dropout=False
         )
 
-        ctr_logit = self.ctr_head(output)
-        cvr_logit = self.cvr_head(output)
-        ctcvr_prob = torch.sigmoid(ctr_logit) * torch.sigmoid(cvr_logit)
-        ctcvr_logit = torch.logit(ctcvr_prob.clamp(min=1e-6, max=1 - 1e-6))
+        ctr_repr, cvr_repr, _, _ = self._compute_task_representations(output)
+        ctr_logit = self.ctr_head(ctr_repr)
+        cvr_logit = self.cvr_head(cvr_repr)
+        ctcvr_logit = self._esmm_coupled_logit(ctr_logit, cvr_logit)
         return ctcvr_logit, output

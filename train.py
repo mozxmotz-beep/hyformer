@@ -143,6 +143,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--focal_gamma', type=float, default=2.0,
                         help='Focal Loss focusing parameter gamma '
                              '(effective only when --loss_type=focal)')
+    parser.add_argument('--esmm_multitask_loss', action='store_true', default=False,
+                        help='Enable ESMM multi-task supervision: CTR/CVR/CTCVR joint losses')
+    parser.add_argument('--w_ctr', type=float, default=1.0,
+                        help='Weight of CTR loss when --esmm_multitask_loss is enabled')
+    parser.add_argument('--w_cvr', type=float, default=1.0,
+                        help='Weight of CVR loss when --esmm_multitask_loss is enabled')
+    parser.add_argument('--w_ctcvr', type=float, default=0.5,
+                        help='Weight of CTCVR loss when --esmm_multitask_loss is enabled')
+    parser.add_argument('--use_mmoe', action='store_true', default=False,
+                        help='Enable MMoE task decoupling between CTR and CVR towers')
+    parser.add_argument('--mmoe_num_experts', type=int, default=4,
+                        help='Number of experts used by MMoE when --use_mmoe is enabled')
+    parser.add_argument('--use_cgc', action='store_true', default=False,
+                        help='Enable CGC variant: shared experts + task-private experts')
+    parser.add_argument('--cgc_task_experts', type=int, default=2,
+                        help='Number of task-private experts per tower when --use_cgc is enabled')
+    parser.add_argument('--gate_entropy_reg', type=float, default=0.0,
+                        help='Entropy regularization weight for MMoE/CGC gates (0 disables)')
 
     # Sparse optimizer.
     parser.add_argument('--sparse_lr', type=float, default=0.05,
@@ -301,6 +319,10 @@ def main() -> None:
         "ns_tokenizer_type": args.ns_tokenizer_type,
         "user_ns_tokens": args.user_ns_tokens,
         "item_ns_tokens": args.item_ns_tokens,
+        "use_mmoe": args.use_mmoe,
+        "mmoe_num_experts": args.mmoe_num_experts,
+        "use_cgc": args.use_cgc,
+        "cgc_task_experts": args.cgc_task_experts,
     }
 
     model = PCVRHyFormer(**model_args).to(args.device)
@@ -350,6 +372,11 @@ def main() -> None:
         ns_groups_path=args.ns_groups_json if args.ns_groups_json and os.path.exists(args.ns_groups_json) else None,
         eval_every_n_steps=args.eval_every_n_steps,
         train_config=vars(args),
+        esmm_multitask_loss=args.esmm_multitask_loss,
+        w_ctr=args.w_ctr,
+        w_cvr=args.w_cvr,
+        w_ctcvr=args.w_ctcvr,
+        gate_entropy_reg=args.gate_entropy_reg,
     )
 
     trainer.train()
