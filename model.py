@@ -1761,6 +1761,17 @@ class PCVRHyFormer(nn.Module):
         ctcvr_logit = torch.logit(ctcvr_prob.clamp(min=1e-6, max=1 - 1e-6))
         return ctcvr_logit
 
+    def forward_esmm(self, inputs: ModelInput) -> dict:
+        """Runs forward pass and returns ctr/cvr/ctcvr logits."""
+        ctcvr_logit, emb = self.predict(inputs)
+        ctr_logit = self.ctr_head(emb)
+        cvr_logit = self.cvr_head(emb)
+        return {
+            'ctr_logit': ctr_logit,
+            'cvr_logit': cvr_logit,
+            'ctcvr_logit': ctcvr_logit,
+        }
+
 
     def predict_esmm(self, inputs: ModelInput) -> dict:
         """Returns ESMM outputs: ctr/cvr/ctcvr logits and probabilities."""
