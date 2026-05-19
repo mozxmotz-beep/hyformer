@@ -72,9 +72,9 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 def apply_rope_to_tensor(
-        x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
 ) -> torch.Tensor:
     """Applies Rotary Position Embedding to a single tensor.
 
@@ -123,11 +123,11 @@ class RoPEMultiheadAttention(nn.Module):
     """
 
     def __init__(
-            self,
-            d_model: int,
-            num_heads: int,
-            dropout: float = 0.0,
-            rope_on_q: bool = True,
+        self,
+        d_model: int,
+        num_heads: int,
+        dropout: float = 0.0,
+        rope_on_q: bool = True,
     ) -> None:
         super().__init__()
         self.d_model = d_model
@@ -148,17 +148,17 @@ class RoPEMultiheadAttention(nn.Module):
         nn.init.constant_(self.W_g.bias, 1.0)
 
     def forward(
-            self,
-            query: torch.Tensor,
-            key: torch.Tensor,
-            value: torch.Tensor,
-            key_padding_mask: Optional[torch.Tensor] = None,
-            attn_mask: Optional[torch.Tensor] = None,
-            rope_cos: Optional[torch.Tensor] = None,
-            rope_sin: Optional[torch.Tensor] = None,
-            q_rope_cos: Optional[torch.Tensor] = None,
-            q_rope_sin: Optional[torch.Tensor] = None,
-            need_weights: bool = False,
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_padding_mask: Optional[torch.Tensor] = None,
+        attn_mask: Optional[torch.Tensor] = None,
+        rope_cos: Optional[torch.Tensor] = None,
+        rope_sin: Optional[torch.Tensor] = None,
+        q_rope_cos: Optional[torch.Tensor] = None,
+        q_rope_sin: Optional[torch.Tensor] = None,
+        need_weights: bool = False,
     ) -> tuple:
         """Computes multi-head attention with optional RoPE.
 
@@ -249,11 +249,11 @@ class CrossAttention(nn.Module):
     """
 
     def __init__(
-            self,
-            d_model: int,
-            num_heads: int,
-            dropout: float = 0.0,
-            ln_mode: str = 'pre'
+        self,
+        d_model: int,
+        num_heads: int,
+        dropout: float = 0.0,
+        ln_mode: str = 'pre'
     ) -> None:
         super().__init__()
         self.ln_mode = ln_mode
@@ -270,12 +270,12 @@ class CrossAttention(nn.Module):
             self.norm_kv = nn.LayerNorm(d_model)
 
     def forward(
-            self,
-            query: torch.Tensor,
-            key_value: torch.Tensor,
-            key_padding_mask: Optional[torch.Tensor] = None,
-            rope_cos: Optional[torch.Tensor] = None,
-            rope_sin: Optional[torch.Tensor] = None,
+        self,
+        query: torch.Tensor,
+        key_value: torch.Tensor,
+        key_padding_mask: Optional[torch.Tensor] = None,
+        rope_cos: Optional[torch.Tensor] = None,
+        rope_sin: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Computes cross-attention between query tokens and sequence tokens.
 
@@ -324,12 +324,12 @@ class RankMixerBlock(nn.Module):
     """
 
     def __init__(
-            self,
-            d_model: int,
-            n_total: int,  # T = Nq + Nns
-            hidden_mult: int = 4,
-            dropout: float = 0.0,
-            mode: str = 'full'  # 'full' | 'ffn_only' | 'none'
+        self,
+        d_model: int,
+        n_total: int,  # T = Nq + Nns
+        hidden_mult: int = 4,
+        dropout: float = 0.0,
+        mode: str = 'full'  # 'full' | 'ffn_only' | 'none'
     ) -> None:
         super().__init__()
         self.T = n_total
@@ -422,13 +422,13 @@ class MultiSeqQueryGenerator(nn.Module):
     """
 
     def __init__(
-            self,
-            d_model: int,
-            num_ns: int,
-            num_queries: int,
-            num_sequences: int,
-            hidden_mult: int = 4,
-            query_top_k: int = 32,
+        self,
+        d_model: int,
+        num_ns: int,
+        num_queries: int,
+        num_sequences: int,
+        hidden_mult: int = 4,
+        query_top_k: int = 32,
     ) -> None:
         super().__init__()
         self.num_queries = num_queries
@@ -469,10 +469,10 @@ class MultiSeqQueryGenerator(nn.Module):
         ])
 
     def _target_aware_topk_pool(
-            self,
-            target_item_token: torch.Tensor,
-            seq_tokens: torch.Tensor,
-            seq_padding_mask: torch.Tensor,
+        self,
+        target_item_token: torch.Tensor,
+        seq_tokens: torch.Tensor,
+        seq_padding_mask: torch.Tensor,
     ) -> torch.Tensor:
         """Pool sequence with target-aware Top-K attention."""
         logits = torch.einsum("bd,bld->bl", target_item_token, seq_tokens)
@@ -511,11 +511,11 @@ class MultiSeqQueryGenerator(nn.Module):
         return ctx
 
     def forward(
-            self,
-            ns_tokens: torch.Tensor,
-            seq_tokens_list: list,
-            seq_padding_masks: list,
-            target_item_token: torch.Tensor,
+        self,
+        ns_tokens: torch.Tensor,
+        seq_tokens_list: list,
+        seq_padding_masks: list,
+        target_item_token: torch.Tensor,
     ) -> list:
         """Generates query tokens for each sequence.
 
@@ -570,10 +570,10 @@ class SwiGLUEncoder(nn.Module):
     """
 
     def __init__(
-            self,
-            d_model: int,
-            hidden_mult: int = 4,
-            dropout: float = 0.0
+        self,
+        d_model: int,
+        hidden_mult: int = 4,
+        dropout: float = 0.0
     ) -> None:
         super().__init__()
         self.norm = nn.LayerNorm(d_model)
@@ -581,10 +581,10 @@ class SwiGLUEncoder(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(
-            self,
-            x: torch.Tensor,
-            key_padding_mask: Optional[torch.Tensor] = None,
-            **kwargs
+        self,
+        x: torch.Tensor,
+        key_padding_mask: Optional[torch.Tensor] = None,
+        **kwargs
     ) -> torch.Tensor:
         """Applies the SwiGLU encoder with residual connection.
 
@@ -612,11 +612,11 @@ class TransformerEncoder(nn.Module):
     """
 
     def __init__(
-            self,
-            d_model: int,
-            num_heads: int,
-            hidden_mult: int = 4,
-            dropout: float = 0.0
+        self,
+        d_model: int,
+        num_heads: int,
+        hidden_mult: int = 4,
+        dropout: float = 0.0
     ) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(d_model)
@@ -639,11 +639,11 @@ class TransformerEncoder(nn.Module):
         )
 
     def forward(
-            self,
-            x: torch.Tensor,
-            key_padding_mask: Optional[torch.Tensor] = None,
-            rope_cos: Optional[torch.Tensor] = None,
-            rope_sin: Optional[torch.Tensor] = None,
+        self,
+        x: torch.Tensor,
+        key_padding_mask: Optional[torch.Tensor] = None,
+        rope_cos: Optional[torch.Tensor] = None,
+        rope_sin: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Applies one Transformer encoder layer.
 
@@ -694,13 +694,13 @@ class LongerEncoder(nn.Module):
     """
 
     def __init__(
-            self,
-            d_model: int,
-            num_heads: int,
-            top_k: int = 50,
-            hidden_mult: int = 4,
-            dropout: float = 0.0,
-            causal: bool = False
+        self,
+        d_model: int,
+        num_heads: int,
+        top_k: int = 50,
+        hidden_mult: int = 4,
+        dropout: float = 0.0,
+        causal: bool = False
     ) -> None:
         super().__init__()
         self.top_k = top_k
@@ -730,9 +730,9 @@ class LongerEncoder(nn.Module):
         )
 
     def _gather_top_k(
-            self,
-            x: torch.Tensor,
-            key_padding_mask: torch.Tensor
+        self,
+        x: torch.Tensor,
+        key_padding_mask: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Selects the latest top_k valid tokens from each sample.
 
@@ -783,11 +783,11 @@ class LongerEncoder(nn.Module):
         return top_k_tokens, new_padding_mask, position_indices
 
     def forward(
-            self,
-            x: torch.Tensor,
-            key_padding_mask: Optional[torch.Tensor] = None,
-            rope_cos: Optional[torch.Tensor] = None,
-            rope_sin: Optional[torch.Tensor] = None,
+        self,
+        x: torch.Tensor,
+        key_padding_mask: Optional[torch.Tensor] = None,
+        rope_cos: Optional[torch.Tensor] = None,
+        rope_sin: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Applies the LongerEncoder with adaptive cross/self attention.
 
@@ -873,13 +873,13 @@ class LongerEncoder(nn.Module):
 
 
 def create_sequence_encoder(
-        encoder_type: str,
-        d_model: int,
-        num_heads: int = 4,
-        hidden_mult: int = 4,
-        dropout: float = 0.0,
-        top_k: int = 50,
-        causal: bool = False
+    encoder_type: str,
+    d_model: int,
+    num_heads: int = 4,
+    hidden_mult: int = 4,
+    dropout: float = 0.0,
+    top_k: int = 50,
+    causal: bool = False
 ) -> nn.Module:
     """Creates a sequence encoder of the specified type.
 
@@ -920,18 +920,18 @@ class MultiSeqHyFormerBlock(nn.Module):
     """
 
     def __init__(
-            self,
-            d_model: int,
-            num_heads: int,
-            num_queries: int,
-            num_ns: int,
-            num_sequences: int,
-            seq_encoder_type: str = 'swiglu',
-            hidden_mult: int = 4,
-            dropout: float = 0.0,
-            top_k: int = 50,
-            causal: bool = False,
-            rank_mixer_mode: str = 'full'
+        self,
+        d_model: int,
+        num_heads: int,
+        num_queries: int,
+        num_ns: int,
+        num_sequences: int,
+        seq_encoder_type: str = 'swiglu',
+        hidden_mult: int = 4,
+        dropout: float = 0.0,
+        top_k: int = 50,
+        causal: bool = False,
+        rank_mixer_mode: str = 'full'
     ) -> None:
         super().__init__()
         self.num_sequences = num_sequences
@@ -974,13 +974,13 @@ class MultiSeqHyFormerBlock(nn.Module):
         )
 
     def forward(
-            self,
-            q_tokens_list: list,
-            ns_tokens: torch.Tensor,
-            seq_tokens_list: list,
-            seq_padding_masks: list,
-            rope_cos_list: Optional[List[torch.Tensor]] = None,
-            rope_sin_list: Optional[List[torch.Tensor]] = None,
+        self,
+        q_tokens_list: list,
+        ns_tokens: torch.Tensor,
+        seq_tokens_list: list,
+        seq_padding_masks: list,
+        rope_cos_list: Optional[List[torch.Tensor]] = None,
+        rope_sin_list: Optional[List[torch.Tensor]] = None,
     ) -> Tuple[list, torch.Tensor, list, list]:
         """Processes one multi-sequence HyFormer block step.
 
@@ -1140,13 +1140,13 @@ class RankMixerNSTokenizer(nn.Module):
     """
 
     def __init__(
-            self,
-            feature_specs: List[Tuple[int, int, int]],
-            groups: List[List[int]],
-            emb_dim: int,
-            d_model: int,
-            num_ns_tokens: int,
-            emb_skip_threshold: int = 0,
+        self,
+        feature_specs: List[Tuple[int, int, int]],
+        groups: List[List[int]],
+        emb_dim: int,
+        d_model: int,
+        num_ns_tokens: int,
+        emb_skip_threshold: int = 0,
     ) -> None:
         """Initializes RankMixerNSTokenizer.
 
@@ -1261,38 +1261,38 @@ class PCVRHyFormer(nn.Module):
     """
 
     def __init__(
-            self,
-            # Data schema
-            user_int_feature_specs: List[Tuple[int, int, int]],
-            item_int_feature_specs: List[Tuple[int, int, int]],
-            user_dense_dim: int,
-            item_dense_dim: int,
-            seq_vocab_sizes: "dict[str, List[int]]",  # {domain: [vocab_size_per_fid, ...]}
-            # NS grouping config (grouped by fid index)
-            user_ns_groups: List[List[int]],
-            item_ns_groups: List[List[int]],
-            # Model hyperparameters
-            d_model: int = 64,
-            emb_dim: int = 64,
-            num_queries: int = 1,
-            num_hyformer_blocks: int = 2,
-            num_heads: int = 4,
-            seq_encoder_type: str = 'transformer',
-            hidden_mult: int = 4,
-            dropout_rate: float = 0.01,
-            seq_top_k: int = 50,
-            seq_causal: bool = False,
-            action_num: int = 1,
-            num_time_buckets: int = 65,
-            rank_mixer_mode: str = 'full',
-            use_rope: bool = False,
-            rope_base: float = 10000.0,
-            emb_skip_threshold: int = 0,
-            seq_id_threshold: int = 10000,
-            # NS tokenizer variant
-            ns_tokenizer_type: str = 'rankmixer',
-            user_ns_tokens: int = 0,
-            item_ns_tokens: int = 0,
+        self,
+        # Data schema
+        user_int_feature_specs: List[Tuple[int, int, int]],
+        item_int_feature_specs: List[Tuple[int, int, int]],
+        user_dense_dim: int,
+        item_dense_dim: int,
+        seq_vocab_sizes: "dict[str, List[int]]",  # {domain: [vocab_size_per_fid, ...]}
+        # NS grouping config (grouped by fid index)
+        user_ns_groups: List[List[int]],
+        item_ns_groups: List[List[int]],
+        # Model hyperparameters
+        d_model: int = 64,
+        emb_dim: int = 64,
+        num_queries: int = 1,
+        num_hyformer_blocks: int = 2,
+        num_heads: int = 4,
+        seq_encoder_type: str = 'transformer',
+        hidden_mult: int = 4,
+        dropout_rate: float = 0.01,
+        seq_top_k: int = 50,
+        seq_causal: bool = False,
+        action_num: int = 1,
+        num_time_buckets: int = 65,
+        rank_mixer_mode: str = 'full',
+        use_rope: bool = False,
+        rope_base: float = 10000.0,
+        emb_skip_threshold: int = 0,
+        seq_id_threshold: int = 10000,
+        # NS tokenizer variant
+        ns_tokenizer_type: str = 'rankmixer',
+        user_ns_tokens: int = 0,
+        item_ns_tokens: int = 0,
     ) -> None:
         super().__init__()
 
@@ -1541,7 +1541,7 @@ class PCVRHyFormer(nn.Module):
             self.time_embedding.weight.data[0, :] = 0
 
     def reinit_high_cardinality_params(
-            self, cardinality_threshold: int = 10000
+        self, cardinality_threshold: int = 10000
     ) -> "set[int]":
         """Reinitializes only high-cardinality embeddings.
 
@@ -1615,13 +1615,13 @@ class PCVRHyFormer(nn.Module):
         return [p for p in self.parameters() if p.data_ptr() not in sparse_ptrs]
 
     def _embed_seq_domain(
-            self,
-            seq: torch.Tensor,
-            sideinfo_embs: nn.ModuleList,
-            proj: nn.Module,
-            is_id: List[bool],
-            emb_index: List[int],
-            time_bucket_ids: torch.Tensor,
+        self,
+        seq: torch.Tensor,
+        sideinfo_embs: nn.ModuleList,
+        proj: nn.Module,
+        is_id: List[bool],
+        emb_index: List[int],
+        time_bucket_ids: torch.Tensor,
     ) -> torch.Tensor:
         """Embeds a sequence domain by concatenating sideinfo embeddings and projecting to d_model."""
         B, S, L = seq.shape
@@ -1647,7 +1647,7 @@ class PCVRHyFormer(nn.Module):
         return token_emb
 
     def _make_padding_mask(
-            self, seq_len: torch.Tensor, max_len: int
+        self, seq_len: torch.Tensor, max_len: int
     ) -> torch.Tensor:
         """Generates a padding mask from sequence lengths."""
         device = seq_len.device
@@ -1655,12 +1655,12 @@ class PCVRHyFormer(nn.Module):
         return idx >= seq_len.unsqueeze(1)  # (B, max_len)
 
     def _run_multi_seq_blocks(
-            self,
-            q_tokens_list: list,
-            ns_tokens: torch.Tensor,
-            seq_tokens_list: list,
-            seq_masks_list: list,
-            apply_dropout: bool = True
+        self,
+        q_tokens_list: list,
+        ns_tokens: torch.Tensor,
+        seq_tokens_list: list,
+        seq_masks_list: list,
+        apply_dropout: bool = True
     ) -> torch.Tensor:
         """Runs the multi-sequence block stack with dropout and output projection."""
         if apply_dropout:
