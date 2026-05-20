@@ -1996,3 +1996,71 @@ class PCVRHyFormer(nn.Module):
         ctcvr_logit = self._esmm_coupled_logit(ctr_logit, cvr_logit)
         # expose ctr path embedding for compatibility
         return ctcvr_logit, ctr_output
+
+
+    @staticmethod
+    def infer_mmoe_flags_from_state_dict(state_dict: "dict[str, torch.Tensor]") -> "dict[str, int | bool]":
+        """Infer whether a checkpoint was trained with MMoE/CGC from key names.
+
+        This is useful for inference services where train_config.json may be
+        missing and only ``model.pt`` is available.
+        """
+        keys = set(state_dict.keys())
+        has_shared = any(k.startswith('mmoe_shared_experts.') for k in keys)
+        has_ctr_private = any(k.startswith('mmoe_ctr_experts.') for k in keys)
+        has_cvr_private = any(k.startswith('mmoe_cvr_experts.') for k in keys)
+
+        # Gate output dim equals number of experts consumed by each task tower.
+        gate_out = 0
+        gate_w = state_dict.get('ctr_gate.weight')
+        if isinstance(gate_w, torch.Tensor) and gate_w.ndim == 2:
+            gate_out = int(gate_w.shape[0])
+
+        shared_count = 0
+        if has_shared:
+            shared_count = len({k.split('.')[1] for k in keys if k.startswith('mmoe_shared_experts.')})
+
+        task_experts = 0
+        if has_ctr_private:
+            task_experts = len({k.split('.')[1] for k in keys if k.startswith('mmoe_ctr_experts.')})
+
+        use_mmoe = has_shared or 'ctr_gate.weight' in keys or 'cvr_gate.weight' in keys
+        use_cgc = has_ctr_private or has_cvr_private
+
+        # Fallback when only gates are present.
+        mmoe_num_experts = shared_count
+        if mmoe_num_experts <= 0 and gate_out > 0:
+            mmoe_num_experts = gate_out if not use_cgc else max(1, gate_out - task_experts)
+
+        return {
+            'use_mmoe': bool(use_mmoe),
+            'use_cgc': bool(use_cgc),
+            'mmoe_num_experts': int(max(0, mmoe_num_experts)),
+            'cgc_task_experts': int(max(0, task_experts)),
+        }
+
+    def load_state_dict(self, state_dict, strict: bool = True):  # type: ignore[override]
+        """Load parameters and add actionable hints for common MMoE mismatch.
+
+        A frequent production failure is constructing a non-MMoE model while
+        loading a checkpoint trained with ``--use_mmoe``. In strict mode this
+        throws many "unexpected key(s)" for ``mmoe_*`` and ``*_gate`` params.
+        This override preserves strict semantics but appends a concrete fix.
+        """
+        try:
+            return super().load_state_dict(state_dict, strict=strict)
+        except RuntimeError as exc:
+            msg = str(exc)
+            if strict and ('mmoe_shared_experts.' in msg or 'ctr_gate.weight' in msg):
+                inferred = self.infer_mmoe_flags_from_state_dict(state_dict)
+                hint = (
+                    "\n[PCVRHyFormer load hint] Checkpoint appears to include MMoE/CGC "
+                    f"weights (inferred: use_mmoe={inferred['use_mmoe']}, "
+                    f"use_cgc={inferred['use_cgc']}, "
+                    f"mmoe_num_experts={inferred['mmoe_num_experts']}, "
+                    f"cgc_task_experts={inferred['cgc_task_experts']}). "
+                    "Rebuild model with matching flags or provide train_config.json "
+                    "from the checkpoint directory."
+                )
+                raise RuntimeError(msg + hint) from exc
+            raise
